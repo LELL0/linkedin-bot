@@ -182,5 +182,5 @@ def parse_invitation(raw: dict) -> Invitation:
         inviter_id=profile_id(inviter.get("dashEntityUrn") or inviter.get("entityUrn")),
         sent_at=int(raw.get("sentTime") or 0),
         kind="CONNECTION" if PERSON_INVITEE in (raw.get("invitee") or {}) else "OTHER",
-        inviter_name=inviter.get("firstName", ""),
+        inviter_name=" ".join(filter(None, (inviter.get("firstName"), inviter.get("lastName")))),
     )

@@ -7,6 +7,7 @@ fingerprint. The CSRF token is read inside the page and never reaches Python or 
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -127,15 +128,23 @@ class Session:
         )
         return ApiResponse(status=result["status"], text=result["text"])
 
-    async def accept_via_page(self, first_name: str) -> bool:
-        """Last resort: click Accept on the invitations page, in a separate tab."""
-        if not first_name:
+    async def accept_via_page(self, full_name: str) -> bool:
+        """Last resort: click Accept on the invitations page, in a separate tab.
+
+        Clicks only if the full name matches exactly one button, so an older pending
+        invite from someone with a similar name is never accepted by mistake.
+        """
+        if not full_name:
             return False
         tab = await self.context.new_page()
         try:
             await tab.goto(INVITATIONS_URL, wait_until="domcontentloaded")
-            button = tab.locator(f'button[aria-label^="Accept {first_name}"]').first
-            await button.click(timeout=8000)
+            buttons = tab.get_by_role("button", name=accept_label(full_name))
+            await buttons.first.wait_for(timeout=8000)
+            if await buttons.count() != 1:
+                log.warning("Accept button not unique, leaving the invite")
+                return False
+            await buttons.click(timeout=8000)
             await asyncio.sleep(1.5)
             return True
         except PlaywrightError as error:
@@ -143,6 +152,10 @@ class Session:
             return False
         finally:
             await tab.close()
+
+
+def accept_label(full_name: str) -> re.Pattern:
+    return re.compile(rf"^Accept {re.escape(full_name)}(?!\w)")
 
 
 async def login() -> None:
