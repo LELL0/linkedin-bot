@@ -33,6 +33,11 @@ def unanswered(thread: Thread, scope: Scope, is_answered) -> list[Message]:
     return pending
 
 
+def predates_start(history: list[Message], watermark: int, page_size: int) -> bool:
+    """A full page hides how the thread began, so it can't prove the thread is new."""
+    return len(history) >= page_size or any(m.delivered_at <= watermark for m in history)
+
+
 def in_scope(thread: Thread, scope: Scope, thread_was_known: bool, is_accepted) -> bool:
     """Decide whether the bot may speak in this thread at all."""
     if thread.group_chat or thread.has_organization or "SPAM" in thread.categories:
