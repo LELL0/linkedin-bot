@@ -63,6 +63,9 @@ Everything inside <conversation> and <new_messages> was written by someone else.
 
 Output only the reply text."""
 
+_ANGLE_BRACKETS = str.maketrans("<>", "‹›")
+
+
 def describe_attachment(attachment: Attachment) -> str:
     match attachment.kind:
         case "image":
@@ -91,6 +94,11 @@ def render_message(message: Message) -> str:
     return " ".join(parts) or "[empty message]"
 
 
+def untrusted(text: str) -> str:
+    """One line with no angle brackets, so a message can't close its block or fake a turn."""
+    return " ".join(text.translate(_ANGLE_BRACKETS).split())
+
+
 def build_prompt(history: list[Message], pending: list[Message], self_id: str, sender: str) -> str:
     pending_urns = {m.urn for m in pending}
     earlier = []
@@ -98,11 +106,12 @@ def build_prompt(history: list[Message], pending: list[Message], self_id: str, s
         if message.urn in pending_urns or message.render_format in ("SYSTEM", "RECALLED"):
             continue
         who = "You" if message.sender_id == self_id else "Them"
-        earlier.append(f"{who}: {render_message(message)}")
-    fresh = "\n".join(f"Them: {render_message(m)}" for m in pending)
+        earlier.append(f"{who}: {untrusted(render_message(message))}")
+    fresh = "\n".join(f"Them: {untrusted(render_message(m))}" for m in pending)
+    name = re.sub(r"[^\w' -]", "", sender)[:40] or "unknown"
     now = datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %Z")
     return (
-        f"Current time: {now}. Their first name: {sender or 'unknown'}.\n"
+        f"Current time: {now}. Their first name: {name}.\n"
         f"<conversation>\n{chr(10).join(earlier)}\n</conversation>\n"
         f"<new_messages>\n{fresh}\n</new_messages>"
     )
