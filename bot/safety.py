@@ -57,6 +57,8 @@ NEUTRAL_REPLIES = (
     "give me a little while and I'll come back to you",
 )
 
+ADMITS_AUTOMATION = re.compile(r"\bautomated\b|\bassistant\b|\bbot\b", re.IGNORECASE)
+
 _LEAK = re.compile(
     r"system prompt|my (?:\w+ )?instructions|knowledge cut.?off|as an ai language model"
     r"|\b(?:i am|i'm)\s+(?:an?\s+)?(?:\w+\s+){0,2}?(?:chatgpt|gpt|qwen|llama|claude|gemini|mistral|deepseek)\b"
