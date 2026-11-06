@@ -5,8 +5,11 @@ fingerprint. The CSRF token is read inside the page and never reaches Python or 
 """
 
 import asyncio
+import base64
 import json
 import logging
+import re
+from collections import Counter
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +25,7 @@ HOME_URL = "https://www.linkedin.com/messaging/"
 LOGIN_URL = "https://www.linkedin.com/login"
 INVITATIONS_URL = "https://www.linkedin.com/mynetwork/invitation-manager/received/"
 SIGNED_OUT_MARKERS = ("/login", "/uas/", "/checkpoint/", "/authwall", "/signup")
+_TOPIC = re.compile(r"urn:li-realtime:(\w+)")
 WAKE_TOPICS = ("messagesTopic", "conversationsTopic", "invitationsTopic", "tabBadgeUpdateTopic")
 
 _FETCH_JS = """
@@ -59,6 +63,7 @@ class Session:
         self.page: Page | None = None
         self.wake = asyncio.Event()
         self.realtime_events = 0
+        self.realtime_topics: Counter[str] = Counter()
         # Header values copied from the site's own traffic, so they follow deploys.
         self.learned_headers: dict[str, str] = {}
         self._playwright = None
@@ -84,16 +89,34 @@ class Session:
             await self._playwright.stop()
 
     async def _tap_realtime(self) -> None:
-        """Wake the main loop on any server-sent event the page receives. Payloads are ignored."""
+        """Wake the main loop on realtime events the page receives. Only topic names are kept."""
         cdp = await self.context.new_cdp_session(self.page)
         await cdp.send("Network.enable")
 
-        def on_event(params: dict) -> None:
+        def on_payload(data: str) -> None:
             self.realtime_events += 1
-            if any(topic in params.get("data", "") for topic in WAKE_TOPICS):
+            self.realtime_topics.update(_TOPIC.findall(data) or ["no_topic"])
+            if any(topic in data for topic in WAKE_TOPICS):
                 self.wake.set()
 
-        cdp.on("Network.eventSourceMessageReceived", on_event)
+        async def stream(request_id: str) -> None:
+            try:
+                await cdp.send("Network.streamResourceContent", {"requestId": request_id})
+                log.info("Realtime stream tapped")
+            except PlaywrightError as error:
+                log.warning("Could not tap the realtime stream: %s", type(error).__name__)
+
+        def on_response(params: dict) -> None:
+            if "/realtime/connect" in params["response"]["url"]:
+                asyncio.create_task(stream(params["requestId"]))
+
+        def on_data(params: dict) -> None:
+            if params.get("data"):
+                on_payload(base64.b64decode(params["data"]).decode("utf-8", "ignore"))
+
+        cdp.on("Network.eventSourceMessageReceived", lambda p: on_payload(p.get("data", "")))
+        cdp.on("Network.responseReceived", on_response)
+        cdp.on("Network.dataReceived", on_data)
 
     def _learn_from_request(self, request: Request) -> None:
         if "/voyager/api/" not in request.url:
