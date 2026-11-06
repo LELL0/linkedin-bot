@@ -63,6 +63,10 @@ def test_commitment_in_draft_is_held():
     assert run(draft="Yes, Tuesday 3pm works.", answer="unsafe\nS16")[0] in HOLD_COMMITMENT
 
 
+def test_commitment_verdict_on_the_question_still_drafts_a_reply():
+    assert run(draft="Maybe, let me look at my week.", question="unsafe\nS16")[0].startswith("Maybe")
+
+
 def test_draft_with_no_verdict_is_never_sent():
     assert run(answer="")[0] in NEUTRAL_REPLIES
     assert run(answer=httpx.ConnectError("down"))[0] in NEUTRAL_REPLIES
