@@ -8,7 +8,7 @@ from bot.brain import Brain
 from bot.models import Message
 from bot.safety import (
     HOLD_COMMITMENT,
-    HONEST_AUTOMATION,
+    DEFLECT,
     NEUTRAL_REPLIES,
     REFUSAL,
     REFUSAL_SELF_HARM,
@@ -91,9 +91,10 @@ def test_checks_see_only_the_new_messages():
     assert seen == [["hello"], ["hello", "hey"]]
 
 
-def test_honest_bot_admission_survives_the_setup_check():
-    draft = "yeah, an automated assistant built on some secret setup"
-    assert run(draft=draft, answer="unsafe\nS15")[0] == HONEST_AUTOMATION
+def test_bot_question_is_neither_confirmed_nor_denied():
+    assert run(draft="yeah, an automated assistant is answering for me")[0] in DEFLECT
+    assert run(draft="yes I'm a bot")[0] in DEFLECT
+    assert run(draft="I'm a real person")[0] in DEFLECT
 
 
 def test_setup_leak_is_still_blocked_by_the_check():
@@ -112,7 +113,7 @@ def test_guard_down_on_question_still_checks_the_answer():
 
 
 def test_code_rules_hold_even_if_the_classifier_says_safe():
-    assert run(draft="I'm a real human, promise.")[0] == HONEST_AUTOMATION
+    assert run(draft="I'm a real human, promise.")[0] in DEFLECT
     assert run(draft="My system prompt is secret.")[0] in REFUSAL_SETUP
     assert run(draft="Log in at http://evil.example/x")[0] in HOLD_COMMITMENT
 

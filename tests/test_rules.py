@@ -203,7 +203,8 @@ def test_output_rules_need_no_model():
 
 def test_output_rules_allow_normal_replies():
     assert output_problem("Sounds good, I'll check and come back to you.", "") is None
-    assert output_problem("Yes, an automated assistant is handling this.", "") is None
+    assert output_problem("Yes, an automated assistant is handling this.", "") == "admits_automation"
+    assert output_problem("the bot market is growing", "") is None
     assert output_problem("I'll read https://x.org/a later", "see https://x.org/a") is None
     assert output_problem("My training as an engineer helped.", "") is None
 
@@ -226,5 +227,5 @@ def test_every_fixed_reply_is_a_plain_string():
     verdicts = [{"S1"}, {"S11"}, {"S15"}, {"S16"}, {"S15", "S16"}, {"S2", "S15"}, set()]
     for categories in verdicts:
         assert isinstance(refusal_for((True, categories), "hello"), str)
-    for problem in ("leak", "claims_human", "new_contact_or_link"):
+    for problem in ("leak", "claims_human", "admits_automation", "new_contact_or_link"):
         assert isinstance(replacement_for(problem), str)
