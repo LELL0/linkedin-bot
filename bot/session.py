@@ -122,9 +122,15 @@ class Session:
         headers = {"accept": accept, **self.learned_headers}
         if content_type:
             headers["content-type"] = content_type
-        result = await self.page.evaluate(
-            _FETCH_JS, {"method": method, "url": path, "headers": headers, "body": body}
-        )
+        request = {"method": method, "url": path, "headers": headers, "body": body}
+        try:
+            result = await self.page.evaluate(_FETCH_JS, request)
+        except PlaywrightError as error:
+            if "context was destroyed" not in str(error):
+                raise
+            # The page navigated mid-call, so wait for it to settle and try once more.
+            await self.page.wait_for_load_state("domcontentloaded")
+            result = await self.page.evaluate(_FETCH_JS, request)
         return ApiResponse(status=result["status"], text=result["text"])
 
     async def accept_via_page(self, first_name: str) -> bool:
