@@ -8,8 +8,8 @@ import time
 
 from .brain import Brain
 from .config import CONFIG
-from .guard import Scope, in_scope, unanswered
-from .linkedin import INBOX_CATEGORIES, AuthError, LinkedIn
+from .guard import Scope, in_scope, predates_start, unanswered
+from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
 from .session import Session
 from .store import Store
@@ -156,7 +156,11 @@ class Engine:
 
     async def pending_for(self, thread: Thread) -> tuple[list[Message], list[Message]]:
         history = await self.api.list_messages(thread.urn)
-        pre_existing = any(m.delivered_at <= self.scope.watermark for m in history)
+        pre_existing = not self.store.is_new_thread(thread.urn) and predates_start(
+            history, self.scope.watermark, MESSAGE_PAGE
+        )
+        if history and not pre_existing:
+            self.store.add_new_thread(thread.urn)  # Stays new once the page fills up.
         thread.messages = history
         if not in_scope(thread, self.scope, pre_existing, self.store.is_accepted):
             return history, []
