@@ -74,7 +74,7 @@ Each reply is split into noticing it, waiting for quiet, the model draft, the dr
 
 State and logs live in `~/.local/share/linkedin-bot`, outside this repository. The database stores ids and timestamps, never message text, and logs record counts and timings only. Incoming messages are sent to the AI provider to write the reply. Test data is synthetic.
 
-By default (`REPLY_SCOPE=new_threads`) the bot only speaks in threads that started after it first ran, or to people it accepted, so existing contacts don't get automated replies. `REPLY_SCOPE=all` answers any new one-to-one message.
+By default (`REPLY_SCOPE=new_threads`) the bot only speaks in threads that started after it first ran, or to people it accepted, from the moment it accepted them. Other existing contacts don't get automated replies. `REPLY_SCOPE=all` answers any new one-to-one message.
 
 ## What it cannot do yet
 

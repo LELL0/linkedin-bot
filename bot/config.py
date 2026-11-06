@@ -40,6 +40,8 @@ class Config:
     debounce_max_s: float = 9.0
     # Backstop polling. The realtime wake-up is the fast path.
     idle_poll_s: float = float(os.environ.get("IDLE_POLL_S", "12"))
+    # Invites get their own quick check, because accept speed is what matters there.
+    invite_poll_s: float = float(os.environ.get("INVITE_POLL_S", "4"))
     hot_poll_s: float = 2.0
     hot_window_s: float = 90.0
 

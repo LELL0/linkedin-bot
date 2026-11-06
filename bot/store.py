@@ -45,6 +45,12 @@ class Store:
     def is_accepted(self, profile_id: str) -> bool:
         return self._has("SELECT 1 FROM accepted_people WHERE profile_id = ?", profile_id)
 
+    def accepted_at(self, profile_id: str) -> int:
+        row = self.db.execute(
+            "SELECT at_ms FROM accepted_people WHERE profile_id = ?", (profile_id,)
+        ).fetchone()
+        return row[0] if row else 0
+
     def add_seen_invite(self, invite_id: str) -> None:
         self._add("INSERT OR IGNORE INTO seen_invites VALUES (?)", invite_id)
 
