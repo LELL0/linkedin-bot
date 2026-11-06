@@ -92,8 +92,8 @@ def test_checks_see_only_the_new_messages():
 
 
 def test_honest_bot_admission_survives_the_setup_check():
-    draft = "yeah, an automated assistant is answering for me"
-    assert run(draft=draft, answer="unsafe\nS15")[0] == draft
+    draft = "yeah, an automated assistant built on some secret setup"
+    assert run(draft=draft, answer="unsafe\nS15")[0] == HONEST_AUTOMATION
 
 
 def test_setup_leak_is_still_blocked_by_the_check():
