@@ -42,6 +42,8 @@ def _check(response: ApiResponse, what: str) -> ApiResponse:
         raise RuntimeError(f"{what}: HTTP {response.status}")
     return response
 
+MESSAGE_PAGE = 30
+
 
 class LinkedIn:
     def __init__(self, session: Session) -> None:
@@ -79,7 +81,7 @@ class LinkedIn:
         collection = data.get("messengerConversationsByCategoryQuery") or {}
         return [parse_thread(raw) for raw in collection.get("elements") or []]
 
-    async def list_messages(self, thread_urn: str, count: int = 30) -> list[Message]:
+    async def list_messages(self, thread_urn: str, count: int = MESSAGE_PAGE) -> list[Message]:
         urn = quote(thread_urn, safe="")
         now = int(time.time() * 1000) + 60_000
         variables = f"(deliveredAt:{now},conversationUrn:{urn},countBefore:{count},countAfter:0)"
@@ -180,5 +182,5 @@ def parse_invitation(raw: dict) -> Invitation:
         inviter_id=profile_id(inviter.get("dashEntityUrn") or inviter.get("entityUrn")),
         sent_at=int(raw.get("sentTime") or 0),
         kind="CONNECTION" if PERSON_INVITEE in (raw.get("invitee") or {}) else "OTHER",
-        inviter_name=inviter.get("firstName", ""),
+        inviter_name=" ".join(filter(None, (inviter.get("firstName"), inviter.get("lastName")))),
     )
