@@ -28,25 +28,31 @@ Answer with exactly "safe", or "unsafe" then a new line with the category codes 
 
 BLOCKED_CATEGORIES = {"S1", "S2", "S3", "S4", "S9", "S10", "S11", "S12", "S14", "S15", "S16"}
 
-REFUSAL = "Sorry, that's not something I can help with."
+DRAFT_ONLY_CATEGORIES = {"S15", "S16"}
+
+REFUSAL = (
+    "not something I can help with, sorry",
+    "I'm going to pass on that one",
+    "sorry, not getting into that",
+)
 REFUSAL_SELF_HARM = (
     "I'm really sorry you're going through this. I can't help with that, but you don't have "
     "to face it alone. Please call your local emergency number or reach someone you trust right now."
 )
-REFUSAL_SETUP = "I can't get into how this is set up. What did you want to ask?"
+REFUSAL_SETUP = ("haha nice try", "not getting into that haha", "nope, not going there")
 REFUSAL_SETUP_AR = "لا يمكنني الحديث عن هذا. ما الذي أردت أن تسأل عنه؟"
 HOLD_COMMITMENT = (
-    "Let me check on that and get back to you.",
-    "I'd need to look into that first, I'll come back to you.",
-    "Not sure yet, let me check and get back to you on it.",
+    "let me check and get back to you",
+    "not sure yet, I'll get back to you on that",
+    "need to look into that first, will let you know",
 )
-HONEST_AUTOMATION = "To be straight with you, an automated assistant is handling my messages right now."
+HONEST_AUTOMATION = "to be straight with you, this is an automated assistant answering for me right now"
 
 # Used when a reply can't be produced or checked. It says nothing that could need checking.
 NEUTRAL_REPLIES = (
-    "Sorry, I'm tied up for a moment. I'll get back to you properly soon.",
-    "Got your message, just in the middle of something. I'll reply properly in a bit.",
-    "Thanks, I saw this. Give me a little while and I'll come back to you.",
+    "sorry, tied up right now, will get back to you in a bit",
+    "saw this, just in the middle of something. back soon",
+    "give me a little while and I'll come back to you",
 )
 
 _LEAK = re.compile(
@@ -88,11 +94,13 @@ def refusal_for(verdict: tuple[bool, set[str]], last_message: str) -> str:
     _, categories = verdict
     if "S11" in categories:
         return REFUSAL_SELF_HARM
+    if not categories or categories - DRAFT_ONLY_CATEGORIES:
+        return random.choice(REFUSAL)
     if "S15" in categories:
-        return REFUSAL_SETUP_AR if re.search(r"[؀-ۿ]", last_message) else REFUSAL_SETUP
-    if "S16" in categories:
-        return random.choice(HOLD_COMMITMENT)
-    return REFUSAL
+        if re.search(r"[\u0600-\u06FF]", last_message):
+            return REFUSAL_SETUP_AR
+        return random.choice(REFUSAL_SETUP)
+    return random.choice(HOLD_COMMITMENT)
 
 
 def output_problem(reply: str, conversation_text: str) -> str | None:
@@ -112,7 +120,7 @@ def output_problem(reply: str, conversation_text: str) -> str | None:
 def replacement_for(problem: str) -> str:
     match problem:
         case "leak":
-            return REFUSAL_SETUP
+            return random.choice(REFUSAL_SETUP)
         case "claims_human":
             return HONEST_AUTOMATION
     return random.choice(HOLD_COMMITMENT)
