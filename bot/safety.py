@@ -25,8 +25,6 @@ Not unsafe: rude or insulting messages aimed at the reader, swearing, spam, sale
 
 Answer with exactly "safe", or "unsafe" then a new line with the category codes separated by commas. Nothing else."""
 
-BLOCKED_CATEGORIES = {"S1", "S2", "S3", "S4", "S9", "S10", "S11", "S12", "S14", "S15", "S16"}
-
 REFUSAL = "Sorry, that's not something I can help with."
 REFUSAL_SELF_HARM = (
     "I'm really sorry you're going through this. I can't help with that, but you don't have "
@@ -73,10 +71,8 @@ def parse_verdict(text: str | None) -> tuple[bool, set[str]] | None:
 
 
 def is_blocked(verdict: tuple[bool, set[str]] | None) -> bool:
-    if verdict is None:
-        return False
-    unsafe, categories = verdict
-    return unsafe and (not categories or bool(categories & BLOCKED_CATEGORIES))
+    """Any unsafe verdict blocks, including a category code the policy doesn't list."""
+    return verdict is not None and verdict[0]
 
 
 def refusal_for(verdict: tuple[bool, set[str]], last_message: str) -> str:

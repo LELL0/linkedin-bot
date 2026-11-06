@@ -158,7 +158,7 @@ def test_verdict_parsing_and_blocking():
     assert parse_verdict("") is None and parse_verdict("no idea") is None
     assert is_blocked((True, {"S16"})) and is_blocked((True, set()))
     assert not is_blocked((False, set())) and not is_blocked(None)
-    assert not is_blocked((True, {"S5"}))
+    assert is_blocked((True, {"S5"}))
 
 
 def test_refusals_match_the_category():
