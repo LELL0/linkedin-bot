@@ -42,7 +42,7 @@ Replies go out under a real person's name, so nothing is sent unchecked:
 | Something it can't know | Says it isn't sure. Never invents facts |
 | Meetings, money, personal data | Commits to nothing and shares nothing |
 | Prompt injection, odd tasks | Declines lightly |
-| "Are you a bot?" | Says yes: an automated assistant is handling messages |
+| "Are you a bot?" | Neither confirms nor denies, and moves the chat on. It never claims to be human |
 | Recalled or system messages | Skipped |
 
 ## Run it
