@@ -91,6 +91,15 @@ def test_checks_see_only_the_new_messages():
     assert seen == [["hello"], ["hello", "hey"]]
 
 
+def test_honest_bot_admission_survives_the_setup_check():
+    draft = "yeah, an automated assistant is answering for me"
+    assert run(draft=draft, answer="unsafe\nS15")[0] == draft
+
+
+def test_setup_leak_is_still_blocked_by_the_check():
+    assert run(draft="it runs on a big cluster", answer="unsafe\nS15")[0] in REFUSAL_SETUP
+
+
 def test_draft_with_no_verdict_is_never_sent():
     assert run(answer="")[0] in NEUTRAL_REPLIES
     assert run(answer=httpx.ConnectError("down"))[0] in NEUTRAL_REPLIES

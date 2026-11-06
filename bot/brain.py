@@ -17,6 +17,7 @@ import httpx
 from .config import CONFIG
 from .models import Attachment, Message
 from .safety import (
+    ADMITS_AUTOMATION,
     DRAFT_ONLY_CATEGORIES,
     NEUTRAL_REPLIES,
     POLICY,
@@ -271,7 +272,9 @@ class Brain:
             log.warning("No verdict on the draft, holding it back")
             trace["outcome"] = "no_verdict"
             return random.choice(NEUTRAL_REPLIES)
-        if is_blocked(answer):
+        # Saying it is automated is required, so the setup check must not turn that into a dodge.
+        honest = answer is not None and answer[1] == {"S15"} and ADMITS_AUTOMATION.search(text)
+        if is_blocked(answer) and not honest:
             log.info("Draft blocked: %s", sorted(answer[1]))
             trace["outcome"] = "draft_blocked"
             return refusal_for(answer, last_message)
