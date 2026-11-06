@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 
+from bot import metrics
 from bot.brain import build_prompt, clean_reply, render_message
 from bot.linkedin import PERSON_INVITEE, parse_invitation
 from bot.guard import Scope, in_scope, unanswered
@@ -14,6 +15,7 @@ from bot.safety import (
     output_problem,
     parse_verdict,
     refusal_for,
+    replacement_for,
 )
 from bot.models import Attachment, Message, Thread, parse_message, parse_thread, profile_id
 
@@ -125,6 +127,12 @@ def test_prompt_separates_history_from_new_messages():
     assert "Them: latest" in prompt.split("<new_messages>")[1]
 
 
+def test_clean_reply_drops_the_final_full_stop_on_one_liners():
+    assert clean_reply("sounds good.") == "sounds good"
+    assert clean_reply("Sure. Sounds good.") == "Sure. Sounds good."
+    assert clean_reply("you ok?") == "you ok?"
+
+
 def test_clean_reply_removes_model_habits():
     assert clean_reply('"**Sure** — sounds good\n\nthanks"') == "Sure, sounds good thanks"
     assert len(clean_reply("word " * 400)) <= 420
@@ -175,3 +183,25 @@ def test_output_rules_allow_normal_replies():
     assert output_problem("Yes, an automated assistant is handling this.", "") is None
     assert output_problem("I'll read https://x.org/a later", "see https://x.org/a") is None
     assert output_problem("My training as an engineer helped.", "") is None
+
+
+def test_metrics_report_summarises_timings(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    metrics.record("accept", path, total_s=3.0, detect_s=2.5, action_s=0.5, via="rest", trigger="realtime")
+    metrics.record("reply", path, total_s=6.0, since_last_s=5.0, messages=2, outcome="draft_sent", model="m")
+    text = metrics.report(metrics.load(path))
+    assert "Accepted invitations: 1" in text
+    assert "Replies: 1 answering 2 messages" in text
+    assert "via: rest 1" in text and "outcome: draft_sent 1" in text
+
+
+def test_metrics_report_handles_no_data(tmp_path):
+    assert "Replies: 0" in metrics.report(metrics.load(tmp_path / "none.jsonl"))
+
+
+def test_every_fixed_reply_is_a_plain_string():
+    verdicts = [{"S1"}, {"S11"}, {"S15"}, {"S16"}, {"S15", "S16"}, {"S2", "S15"}, set()]
+    for categories in verdicts:
+        assert isinstance(refusal_for((True, categories), "hello"), str)
+    for problem in ("leak", "claims_human", "new_contact_or_link"):
+        assert isinstance(replacement_for(problem), str)

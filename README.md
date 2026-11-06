@@ -59,6 +59,17 @@ uv run python -m bot doctor   # read-only check
 
 Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending or accepting, `REPLY_SCOPE` is covered below, and `AI_BASE_URL`, `AI_MODELS` and `AI_GUARD_MODELS` change the provider. Tests: `uv run pytest`. Reply samples: `uv run python -m tests.eval_replies`.
 
+## Timings
+
+Every accept and reply is written to `~/.local/share/linkedin-bot/metrics.jsonl`, with timings only and no message text.
+
+```bash
+uv run python -m bot stats                       # median, p95 and max for each stage
+tail -f ~/.local/share/linkedin-bot/bot.log      # live view
+```
+
+Each reply is split into noticing it, waiting for quiet, the model draft, the draft check and sending. Each record also shows whether realtime or the poll noticed it, which model answered, and how the reply was decided.
+
 ## Privacy
 
 State and logs live in `~/.local/share/linkedin-bot`, outside this repository. The database stores ids and timestamps, never message text, and logs record counts and timings only. Incoming messages are sent to the AI provider to write the reply. Test data is synthetic.
