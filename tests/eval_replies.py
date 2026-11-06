@@ -9,6 +9,7 @@ from bot.models import Attachment, Message
 from bot.safety import NEUTRAL_REPLIES
 
 ME, THEM = "ACoAAme", "ACoAAthem"
+PACE_S = 6  # Roughly a person typing, and inside the free per-minute token limit.
 CASES = {
     "greeting": ["Hi, thanks for connecting!"],
     "nearly empty": ["?"],
@@ -56,7 +57,8 @@ async def main() -> None:
         reply = await brain.reply(pending, pending, ME, "Sam")
         timings.append(time.perf_counter() - started)
         marker = " [NEUTRAL]" if reply in NEUTRAL_REPLIES else ""
-        print(f"{timings[-1]:4.1f}s {name:13}{marker} {reply}")
+        print(f"{timings[-1]:4.1f}s {name:13}{marker} {reply}", flush=True)
+        await asyncio.sleep(PACE_S)
     print(f"median {statistics.median(timings):.2f}s, max {max(timings):.2f}s")
 
 

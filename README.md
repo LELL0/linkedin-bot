@@ -57,7 +57,7 @@ uv run python -m bot doctor   # read-only check
 ./run.sh                      # blocks sleep and restarts the bot if it exits
 ```
 
-Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending or accepting, `REPLY_SCOPE` is covered below, and `AI_BASE_URL`, `AI_MODELS` and `AI_GUARD_MODEL` change the provider. Tests: `uv run pytest`. Reply samples: `uv run python -m tests.eval_replies`.
+Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending or accepting, `REPLY_SCOPE` is covered below, and `AI_BASE_URL`, `AI_MODELS` and `AI_GUARD_MODELS` change the provider. Tests: `uv run pytest`. Reply samples: `uv run python -m tests.eval_replies`.
 
 ## Privacy
 

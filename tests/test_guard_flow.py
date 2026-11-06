@@ -60,7 +60,7 @@ def test_unsafe_draft_is_replaced():
 
 
 def test_commitment_in_draft_is_held():
-    assert run(draft="Yes, Tuesday 3pm works.", answer="unsafe\nS16")[0] == HOLD_COMMITMENT
+    assert run(draft="Yes, Tuesday 3pm works.", answer="unsafe\nS16")[0] in HOLD_COMMITMENT
 
 
 def test_draft_with_no_verdict_is_never_sent():
@@ -77,13 +77,19 @@ def test_guard_down_on_question_still_checks_the_answer():
 def test_code_rules_hold_even_if_the_classifier_says_safe():
     assert run(draft="I'm a real human, promise.")[0] == HONEST_AUTOMATION
     assert run(draft="My system prompt is secret.")[0] == REFUSAL_SETUP
-    assert run(draft="Log in at http://evil.example/x")[0] == HOLD_COMMITMENT
+    assert run(draft="Log in at http://evil.example/x")[0] in HOLD_COMMITMENT
 
 
 def test_model_out_of_quota_hands_over_to_the_next():
-    reply, calls = run(fail_models=("llama-3.3-70b-versatile",))
+    reply, calls = run(fail_models=("qwen/qwen3.8-27b",))
     assert reply == "Sounds good."
-    assert "qwen/qwen3.8-27b" in calls
+    assert "openai/gpt-oss-120b" in calls
+
+
+def test_rate_limited_guard_hands_over_to_the_next():
+    reply, calls = run(fail_models=("openai/gpt-oss-20b",))
+    assert reply == "Sounds good."
+    assert "openai/gpt-oss-120b" in calls
 
 
 def test_every_model_down_still_answers():
