@@ -1,0 +1,29 @@
+# LinkedIn reply bot on a server. Settings go in .env next to this file (AI_API_KEY, and
+# TG_BOT_TOKEN plus TG_CHAT_ID for alerts). Data (Chrome profile with the LinkedIn login,
+# state, logs, timings) lives in ./data.
+services:
+  linkedin-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        APP_UID: ${APP_UID:-1000}
+    image: linkedin-bot:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Riyadh}
+    volumes:
+      - ./data:/data
+    ports:
+      # VNC, for signing in to LinkedIn: loopback only, use an SSH tunnel.
+      - "127.0.0.1:5901:5900"
+    # Chromium's sandbox needs user namespaces, which Docker's default seccomp profile
+    # blocks; keep the sandbox and drop every capability instead.
+    security_opt:
+      - seccomp=unconfined
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    shm_size: 512m
+    mem_limit: 1536m
+    cpus: ${LINKEDIN_BOT_CPUS:-0.5}

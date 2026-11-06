@@ -16,3 +16,5 @@ PLAN.md
 __pycache__/
 *.pyc
 .pytest_cache/
+deploy/data/
+deploy/.env

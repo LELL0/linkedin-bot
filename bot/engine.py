@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+import os
 import random
-import subprocess
 import time
 
 from . import metrics
 from .brain import Brain
 from .config import CONFIG
+from .health import STALE_POLL_S, alert, start_watchdog, write_status
 from .guard import Scope, in_scope, predates_start, unanswered
 from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
@@ -21,13 +22,6 @@ MAX_REGENERATIONS = 2
 SEND_ATTEMPTS = 3
 PAGE_REFRESH_S = 45 * 60
 HEARTBEAT_S = 60
-
-
-def alert(text: str) -> None:
-    log.error("ALERT: %s", text)
-    subprocess.run(
-        ["notify-send", "-u", "critical", "LinkedIn bot", text], check=False, capture_output=True
-    )
 
 
 class Engine:
@@ -46,8 +40,11 @@ class Engine:
         self.invite_trigger = "poll"
         self.replies_sent = 0
         self.accepted = 0
+        self.state = "starting"
 
     async def run(self) -> None:
+        self.heartbeat = time.time()
+        start_watchdog(lambda: self.heartbeat)
         await self.session.start()
         await self.wait_for_session()
         await self.api.load_self()
@@ -63,7 +60,21 @@ class Engine:
             if not warned:
                 alert("Signed out or checkpoint. Sign in again in the bot's Chrome window.")
                 warned = True
+            self.state = "needs_login"
+            self.write_status()
             await asyncio.sleep(5)
+        self.state = "running"
+        self.last_ok = time.time()
+        self.write_status()
+
+    def write_status(self) -> None:
+        self.heartbeat = time.time()
+        try:
+            write_status(
+                self.state, self.last_ok, accepted=self.accepted, replies=self.replies_sent
+            )
+        except OSError as error:
+            log.warning("Could not write status: %s", error)
 
     async def poll_loop(self) -> None:
         while True:
@@ -120,8 +131,15 @@ class Engine:
                 len(self.workers),
                 time.time() - self.last_ok,
             )
-            if time.time() - self.last_ok > 180:
+            self.write_status()
+            stalled = time.time() - self.last_ok
+            if self.state == "running" and stalled > 180:
                 alert("No successful poll for 3 minutes.")
+            if self.state == "running" and stalled > 2 * STALE_POLL_S:
+                # Exit so the supervisor (systemd or Docker) starts a fresh browser.
+                alert(f"Stuck for {int(stalled)}s, restarting.")
+                logging.shutdown()
+                os._exit(1)  # sys.exit inside a task may not stop the loop.
             idle = not self.workers and time.time() > self.hot_until
             if idle and time.time() - last_refresh > PAGE_REFRESH_S:
                 await self.session.page.reload(wait_until="domcontentloaded")

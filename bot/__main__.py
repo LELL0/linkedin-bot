@@ -4,6 +4,7 @@ python -m bot login    open the sign-in window
 python -m bot doctor   read-only check of every endpoint; prints no names or message text
 python -m bot run      start the bot
 python -m bot stats    summarise accept and reply timings
+python -m bot health   exit 0 if healthy, 1 if not (Docker HEALTHCHECK)
 """
 
 import asyncio
@@ -14,6 +15,7 @@ from logging.handlers import RotatingFileHandler
 from .config import CONFIG
 from .doctor import doctor
 from .engine import Engine
+from .health import check
 from .metrics import print_stats
 from .session import login
 
@@ -38,6 +40,8 @@ def main() -> None:
         asyncio.run(login())
     elif command == "doctor":
         asyncio.run(doctor())
+    elif command == "health":
+        sys.exit(check())
     elif command == "stats":
         print_stats()
     elif command == "run":
