@@ -1,0 +1,41 @@
+"""Runtime settings. Secrets come from .env, and all state lives outside the repository."""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+DATA_DIR = Path(os.environ.get("BOT_DATA_DIR", Path.home() / ".local/share/linkedin-bot"))
+
+
+@dataclass(frozen=True)
+class Config:
+    profile_dir: Path = DATA_DIR / "chrome-profile"
+    db_path: Path = DATA_DIR / "state.db"
+    log_path: Path = DATA_DIR / "bot.log"
+    reply_scope: str = os.environ.get("REPLY_SCOPE", "new_threads")
+    dry_run: bool = os.environ.get("DRY_RUN", "0") == "1"
+    # Any OpenAI-style chat API. The first model that answers is used.
+    ai_base_url: str = os.environ.get("AI_BASE_URL", "https://api.groq.com/openai/v1")
+    ai_api_key: str = os.environ.get("AI_API_KEY", "")
+    ai_models: tuple[str, ...] = tuple(
+        os.environ.get(
+            "AI_MODELS",
+            "llama-3.3-70b-versatile,qwen/qwen3.8-27b,openai/gpt-oss-120b,llama-3.1-8b-instant",
+        ).split(",")
+    )
+    # Kept out of ai_models so answers can't use up the quota the safety check runs on.
+    ai_guard_model: str = os.environ.get("AI_GUARD_MODEL", "openai/gpt-oss-20b")
+    # Wait for this much silence before answering, so a burst gets one reply.
+    debounce_quiet_s: float = 3.0
+    debounce_max_s: float = 9.0
+    # Backstop polling. The realtime wake-up is the fast path.
+    idle_poll_s: float = float(os.environ.get("IDLE_POLL_S", "12"))
+    hot_poll_s: float = 2.0
+    hot_window_s: float = 90.0
+
+
+CONFIG = Config()
