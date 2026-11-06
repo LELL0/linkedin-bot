@@ -126,7 +126,9 @@ class Session:
         try:
             result = await self.page.evaluate(_FETCH_JS, request)
         except PlaywrightError as error:
-            if "context was destroyed" not in str(error):
+            # A POST may already have reached LinkedIn, so repeating it could send a reply twice.
+            # The caller re-reads the thread instead, which shows whether it went through.
+            if method != "GET" or "context was destroyed" not in str(error):
                 raise
             # The page navigated mid-call, so wait for it to settle and try once more.
             await self.page.wait_for_load_state("domcontentloaded")
