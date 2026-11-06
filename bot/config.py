@@ -24,11 +24,16 @@ class Config:
     ai_models: tuple[str, ...] = tuple(
         os.environ.get(
             "AI_MODELS",
-            "llama-3.3-70b-versatile,qwen/qwen3.8-27b,openai/gpt-oss-120b,llama-3.1-8b-instant",
+            "qwen/qwen3.8-27b,openai/gpt-oss-120b,allam-2-7b",
         ).split(",")
     )
-    # Kept out of ai_models so answers can't use up the quota the safety check runs on.
-    ai_guard_model: str = os.environ.get("AI_GUARD_MODEL", "openai/gpt-oss-20b")
+    # The first guard model stays out of ai_models, so answers can't use up its quota.
+    # The others only step in when it is rate limited, so a check is rarely missed.
+    ai_guard_models: tuple[str, ...] = tuple(
+        os.environ.get(
+            "AI_GUARD_MODELS", "openai/gpt-oss-20b,openai/gpt-oss-120b,qwen/qwen3.8-27b"
+        ).split(",")
+    )
     # Wait for this much silence before answering, so a burst gets one reply.
     debounce_quiet_s: float = 3.0
     debounce_max_s: float = 9.0
