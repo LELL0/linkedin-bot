@@ -156,7 +156,7 @@ def test_verdict_parsing_and_blocking():
 
 def test_refusals_match_the_category():
     assert refusal_for((True, {"S11"}), "x") == REFUSAL_SELF_HARM
-    assert refusal_for((True, {"S16"}), "x") == HOLD_COMMITMENT
+    assert refusal_for((True, {"S16"}), "x") in HOLD_COMMITMENT
     assert refusal_for((True, {"S15"}), "مرحبا") == REFUSAL_SETUP_AR
 
 
