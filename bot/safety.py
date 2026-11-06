@@ -4,6 +4,7 @@ A classifier model checks the incoming message and the drafted reply. The checks
 output_problem need no model, so they still hold if the classifier is rate limited.
 """
 
+import random
 import re
 
 POLICY = """You are a content safety classifier for a LinkedIn direct message assistant that answers for a real person. Read the conversation and classify the LAST message.
@@ -32,7 +33,11 @@ REFUSAL_SELF_HARM = (
 )
 REFUSAL_SETUP = "I can't get into how this is set up. What did you want to ask?"
 REFUSAL_SETUP_AR = "لا يمكنني الحديث عن هذا. ما الذي أردت أن تسأل عنه؟"
-HOLD_COMMITMENT = "Let me check on that and get back to you."
+HOLD_COMMITMENT = (
+    "Let me check on that and get back to you.",
+    "I'd need to look into that first, I'll come back to you.",
+    "Not sure yet, let me check and get back to you on it.",
+)
 HONEST_AUTOMATION = "To be straight with you, an automated assistant is handling my messages right now."
 
 # Used when a reply can't be produced or checked. It says nothing that could need checking.
@@ -82,7 +87,7 @@ def refusal_for(verdict: tuple[bool, set[str]], last_message: str) -> str:
     if "S15" in categories:
         return REFUSAL_SETUP_AR if re.search(r"[؀-ۿ]", last_message) else REFUSAL_SETUP
     if "S16" in categories:
-        return HOLD_COMMITMENT
+        return random.choice(HOLD_COMMITMENT)
     return REFUSAL
 
 
@@ -106,4 +111,4 @@ def replacement_for(problem: str) -> str:
             return REFUSAL_SETUP
         case "claims_human":
             return HONEST_AUTOMATION
-    return HOLD_COMMITMENT
+    return random.choice(HOLD_COMMITMENT)

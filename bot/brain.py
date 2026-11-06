@@ -28,9 +28,10 @@ from .safety import (
 log = logging.getLogger(__name__)
 
 MAX_REPLY_CHARS = 420
-MODEL_TIMEOUT_S = 6.0
-GUARD_TIMEOUT_S = 5.0
+MODEL_TIMEOUT_S = 4.0
+GUARD_TIMEOUT_S = 3.0
 GUARD_TURNS = 6
+GUARD_TURN_CHARS = 1500  # Keeps a very long message from using up the free token quota.
 
 SYSTEM_PROMPT = """You are answering LinkedIn direct messages for {name}, writing in first person as them. {headline_line}
 
@@ -140,7 +141,9 @@ def guard_turns(history: list[Message], pending: list[Message], self_id: str) ->
         if m.urn not in pending_urns and m.render_format not in ("SYSTEM", "RECALLED")
     ]
     turns.append({"role": "user", "content": "\n".join(render_message(m) for m in pending)})
-    return turns[-GUARD_TURNS:]
+    return [
+        {**turn, "content": turn["content"][:GUARD_TURN_CHARS]} for turn in turns[-GUARD_TURNS:]
+    ]
 
 
 class Brain:
@@ -181,20 +184,28 @@ class Brain:
         return ""
 
     async def _classify(self, turns: list[dict]) -> tuple[bool, set[str]] | None:
-        body = {
-            "model": CONFIG.ai_guard_model,
-            "messages": [{"role": "system", "content": POLICY}, *turns],
-            "temperature": 0,
-            "max_tokens": 500,
-        }
-        if "gpt-oss" in CONFIG.ai_guard_model:
-            body["reasoning_effort"] = "low"
-        try:
-            _, text = await self._complete(body, GUARD_TIMEOUT_S)
-        except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
-            log.warning("Guard failed: %s", type(error).__name__)
-            return None
-        return parse_verdict(text)
+        """Ask each guard model in turn until one gives a verdict."""
+        for model in CONFIG.ai_guard_models:
+            body = {
+                "model": model,
+                "messages": [{"role": "system", "content": POLICY}, *turns],
+                "temperature": 0,
+                "max_tokens": 300,
+            }
+            if "gpt-oss" in model:
+                body["reasoning_effort"] = "low"
+            if model.startswith("qwen/"):
+                body["reasoning_format"] = "hidden"
+            try:
+                status, text = await self._complete(body, GUARD_TIMEOUT_S)
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
+                log.warning("Guard %s failed: %s", model, type(error).__name__)
+                continue
+            verdict = parse_verdict(text)
+            if verdict is not None:
+                return verdict
+            log.warning("Guard %s gave no verdict (HTTP %s)", model, status)
+        return None
 
     async def reply(
         self, history: list[Message], pending: list[Message], self_id: str, sender: str
