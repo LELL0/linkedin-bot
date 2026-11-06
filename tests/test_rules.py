@@ -5,7 +5,7 @@ from pathlib import Path
 
 from bot.brain import build_prompt, clean_reply, render_message
 from bot.linkedin import PERSON_INVITEE, parse_invitation
-from bot.guard import Scope, in_scope, unanswered
+from bot.guard import Scope, in_scope, predates_start, unanswered
 from bot.safety import (
     HOLD_COMMITMENT,
     REFUSAL_SELF_HARM,
@@ -73,6 +73,13 @@ def test_scope_protects_existing_threads_unless_person_was_accepted():
     assert in_scope(thread(), SCOPE, False, never)
     assert not in_scope(thread(), SCOPE, True, never)
     assert in_scope(thread(), SCOPE, True, lambda person: person == THEM)
+
+
+def test_full_page_of_recent_messages_does_not_prove_a_thread_is_new():
+    recent = [msg(str(i), THEM, START + i + 1) for i in range(3)]
+    assert not predates_start(recent, START, page_size=30)
+    assert predates_start(recent, START, page_size=3)
+    assert predates_start([msg("old", THEM, START)], START, page_size=30)
 
 
 def test_scope_all_still_skips_groups_companies_and_spam():
