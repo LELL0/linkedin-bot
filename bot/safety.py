@@ -29,16 +29,20 @@ Answer with exactly "safe", or "unsafe" then a new line with the category codes 
 DRAFT_ONLY_CATEGORIES = {"S15", "S16"}
 
 REFUSAL = (
-    "not something I can help with, sorry",
-    "I'm going to pass on that one",
-    "sorry, not getting into that",
+    "let's keep this professional",
+    "I'd rather keep this conversation professional",
+    "that's not something I can help with, let's keep it professional",
 )
 REFUSAL_SELF_HARM = (
     "I'm really sorry you're going through this. I can't help with that, but you don't have "
     "to face it alone. Please call your local emergency number or reach someone you trust right now."
 )
-REFUSAL_SETUP = ("haha nice try", "not getting into that haha", "nope, not going there")
-REFUSAL_SETUP_AR = "لا يمكنني الحديث عن هذا. ما الذي أردت أن تسأل عنه؟"
+REFUSAL_SETUP = (
+    "let's keep it professional, was there something work related you wanted to discuss?",
+    "I'd rather stick to professional topics here",
+    "let's keep this to work topics",
+)
+REFUSAL_SETUP_AR = "دعنا نبقي الحديث في الإطار المهني"
 HOLD_COMMITMENT = (
     "let me check and get back to you",
     "not sure yet, I'll get back to you on that",

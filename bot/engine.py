@@ -96,10 +96,11 @@ class Engine:
         while True:
             await asyncio.sleep(HEARTBEAT_S)
             log.info(
-                "alive: accepted=%d replies=%d realtime_events=%d workers=%d last_ok=%ds ago",
+                "alive: accepted=%d replies=%d realtime_events=%d topics=%s workers=%d last_ok=%ds ago",
                 self.accepted,
                 self.replies_sent,
                 self.session.realtime_events,
+                dict(self.session.realtime_topics),
                 len(self.workers),
                 time.time() - self.last_ok,
             )
