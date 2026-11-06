@@ -16,6 +16,7 @@ class Config:
     profile_dir: Path = DATA_DIR / "chrome-profile"
     db_path: Path = DATA_DIR / "state.db"
     log_path: Path = DATA_DIR / "bot.log"
+    metrics_path: Path = DATA_DIR / "metrics.jsonl"
     reply_scope: str = os.environ.get("REPLY_SCOPE", "new_threads")
     dry_run: bool = os.environ.get("DRY_RUN", "0") == "1"
     # Any OpenAI-style chat API. The first model that answers is used.

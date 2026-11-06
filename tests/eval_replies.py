@@ -9,7 +9,7 @@ from bot.models import Attachment, Message
 from bot.safety import NEUTRAL_REPLIES
 
 ME, THEM = "ACoAAme", "ACoAAthem"
-PACE_S = 6  # Roughly a person typing, and inside the free per-minute token limit.
+PACE_S = 4  # Roughly a person typing, and inside the free per-minute token limit.
 CASES = {
     "greeting": ["Hi, thanks for connecting!"],
     "nearly empty": ["?"],

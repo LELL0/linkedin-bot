@@ -6,6 +6,7 @@ import random
 import subprocess
 import time
 
+from . import metrics
 from .brain import Brain
 from .config import CONFIG
 from .guard import Scope, in_scope, unanswered
@@ -41,6 +42,7 @@ class Engine:
         self.seen_activity: dict[str, int] = {}
         self.hot_until = 0.0
         self.last_ok = time.time()
+        self.trigger = "poll"  # What started the current check: poll or realtime.
         self.replies_sent = 0
         self.accepted = 0
 
@@ -78,11 +80,12 @@ class Engine:
     async def sleep_until_next_poll(self) -> None:
         hot = time.time() < self.hot_until
         delay = CONFIG.hot_poll_s if hot else CONFIG.idle_poll_s * random.uniform(0.8, 1.2)
-        self.session.wake.clear()
         try:
             await asyncio.wait_for(self.session.wake.wait(), timeout=delay)
+            self.trigger = "realtime"
         except TimeoutError:
-            pass
+            self.trigger = "poll"
+        self.session.wake.clear()
 
     async def recover(self) -> None:
         await self.session.page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
@@ -108,6 +111,7 @@ class Engine:
                 last_refresh = time.time()
 
     async def check_invitations(self) -> None:
+        checked_at = time.time()
         for invitation in await self.api.list_invitations():
             if self.store.is_seen_invite(invitation.urn) or invitation.kind != "CONNECTION":
                 continue
@@ -116,9 +120,18 @@ class Engine:
                 continue
             if CONFIG.dry_run:
                 log.info("DRY RUN: would accept an invitation")
-            elif await self.api.accept(invitation):
+            elif via := await self.api.accept(invitation):
                 self.accepted += 1
-                log.info("Accepted invitation, %.1fs after it was sent", time.time() - invitation.sent_at / 1000)
+                now, sent = time.time(), invitation.sent_at / 1000
+                timing = {
+                    "total_s": round(now - sent, 2),
+                    "detect_s": round(checked_at - sent, 2),
+                    "action_s": round(now - checked_at, 2),
+                    "via": via,
+                    "trigger": self.trigger,
+                }
+                metrics.record("accept", **timing)
+                log.info("Accepted invitation: %s", timing)
             else:
                 alert("Could not accept an invitation.")
                 continue
@@ -135,13 +148,15 @@ class Engine:
                 self.hot_until = time.time() + CONFIG.hot_window_s
                 worker = self.workers.get(thread.urn)
                 if worker is None or worker.done():
-                    self.workers[thread.urn] = asyncio.create_task(self.answer_thread(thread))
+                    self.workers[thread.urn] = asyncio.create_task(
+                        self.answer_thread(thread, time.time(), self.trigger)
+                    )
                 else:
                     self.recheck.add(thread.urn)  # Arrived mid-answer: look again afterwards.
 
-    async def answer_thread(self, thread: Thread) -> None:
+    async def answer_thread(self, thread: Thread, noticed_at: float, trigger: str) -> None:
         try:
-            await self._answer_thread(thread)
+            await self._answer_thread(thread, noticed_at, trigger)
         except AuthError as error:
             log.error("Auth problem while answering: %s", error)
             self.seen_activity.pop(thread.urn, None)  # Retry on the next poll.
@@ -174,18 +189,21 @@ class Engine:
                 return
             await asyncio.sleep(min(1.0, CONFIG.debounce_quiet_s - silence + 0.05))
 
-    async def _answer_thread(self, thread: Thread) -> None:
+    async def _answer_thread(self, thread: Thread, noticed_at: float, trigger: str) -> None:
         await self.wait_for_quiet(thread)
+        quiet_at = time.time()
         history, pending = await self.pending_for(thread)
         if not pending:
             return
         await self.api.mark_read(thread.urn)
         await self.api.show_typing(thread.urn)
 
+        trace = {"trigger": trigger, "redrafts": -1}
         for _ in range(MAX_REGENERATIONS + 1):
+            trace["redrafts"] += 1
             others = [p for p in thread.participants if p != self.scope.self_id]
             sender = thread.names.get(others[0], "") if others else ""
-            reply = await self.brain.reply(history, pending, self.scope.self_id, sender)
+            reply = await self.brain.reply(history, pending, self.scope.self_id, sender, trace)
             history, latest = await self.pending_for(thread)
             if not latest:
                 return  # Recalled, or answered by hand in the meantime.
@@ -193,20 +211,32 @@ class Engine:
                 break
             pending = latest  # More arrived while thinking, so answer those too.
 
-        await self.send(thread, reply, pending)
+        first = pending[0].delivered_at / 1000
+        trace |= {"detect_s": round(noticed_at - first, 2), "quiet_s": round(quiet_at - noticed_at, 2)}
+        await self.send(thread, reply, pending, trace)
 
-    async def send(self, thread: Thread, reply: str, pending: list[Message]) -> None:
-        latency = time.time() - pending[0].delivered_at / 1000
+    async def send(self, thread: Thread, reply: str, pending: list[Message], trace: dict) -> None:
         if CONFIG.dry_run:
-            log.info("DRY RUN: would send %d chars after %.1fs", len(reply), latency)
+            log.info("DRY RUN: would send %d chars: %s", len(reply), trace)
             self.store.mark_answered([m.urn for m in pending])
             return
+        started = time.time()
         for attempt in range(1, SEND_ATTEMPTS + 1):
             try:
                 await self.api.send_reply(thread.urn, reply)
                 self.store.mark_answered([m.urn for m in pending])
                 self.replies_sent += 1
-                log.info("Replied to %d message(s) after %.1fs", len(pending), latency)
+                now = time.time()
+                trace |= {
+                    "total_s": round(now - pending[0].delivered_at / 1000, 2),
+                    "since_last_s": round(now - pending[-1].delivered_at / 1000, 2),
+                    "send_s": round(now - started, 2),
+                    "messages": len(pending),
+                    "chars": len(reply),
+                    "attempts": attempt,
+                }
+                metrics.record("reply", **trace)
+                log.info("Replied: %s", trace)
                 return
             except RuntimeError as error:
                 log.warning("Send attempt %d failed: %s", attempt, error)

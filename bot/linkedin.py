@@ -140,8 +140,8 @@ class LinkedIn:
             for view in response.json().get("elements") or []
         ]
 
-    async def accept(self, invitation: Invitation) -> bool:
-        """Try the REST action, then the newer Dash action, then the Accept button on the page."""
+    async def accept(self, invitation: Invitation) -> str:
+        """Try the REST action, then Dash, then the Accept button. Returns the path that worked."""
         legacy = await self.session.call(
             "POST",
             f"/voyager/api/relationships/invitations/{invitation.invitation_id}?action=accept",
@@ -155,7 +155,7 @@ class LinkedIn:
             ),
         )
         if legacy.ok:
-            return True
+            return "rest"
         log.warning("REST accept failed (HTTP %s), trying Dash", legacy.status)
         urn = f"urn:li:fsd_invitation:{invitation.invitation_id}"
         dash = await self.session.call(
@@ -165,9 +165,9 @@ class LinkedIn:
             body=json.dumps({"invitationUrn": urn, "sharedSecret": invitation.shared_secret}),
         )
         if dash.ok:
-            return True
+            return "dash"
         log.warning("Dash accept failed (HTTP %s), trying the page", dash.status)
-        return await self.session.accept_via_page(invitation.inviter_name)
+        return "page" if await self.session.accept_via_page(invitation.inviter_name) else ""
 
 
 def parse_invitation(raw: dict) -> Invitation:
