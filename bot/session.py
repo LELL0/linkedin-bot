@@ -62,6 +62,7 @@ class Session:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.wake = asyncio.Event()
+        self.invite_wake = asyncio.Event()
         self.realtime_events = 0
         self.realtime_topics: Counter[str] = Counter()
         # Header values copied from the site's own traffic, so they follow deploys.
@@ -98,6 +99,7 @@ class Session:
             self.realtime_topics.update(_TOPIC.findall(data) or ["no_topic"])
             if any(topic in data for topic in WAKE_TOPICS):
                 self.wake.set()
+                self.invite_wake.set()
 
         async def stream(request_id: str) -> None:
             try:

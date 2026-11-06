@@ -103,7 +103,7 @@ def sim(tmp_path, monkeypatch):
         bot.scope = Scope(mode, now_ms(-3600), ME)
         bot.session = SimpleNamespace(realtime_events=0)
         bot.workers, bot.recheck, bot.seen_activity = {}, set(), {}
-        bot.hot_until, bot.last_ok, bot.trigger = 0.0, time.time(), "poll"
+        bot.hot_until, bot.last_ok, bot.trigger, bot.invite_trigger = 0.0, time.time(), "poll", "poll"
         bot.replies_sent = bot.accepted = 0
         return bot
 
@@ -194,13 +194,20 @@ def test_old_thread_is_answered_in_scope_all(sim):
     assert len(bot.api.sent) == 1
 
 
-def test_person_the_bot_accepted_is_answered_in_an_old_thread(sim):
+def test_accepted_person_is_answered_only_for_messages_after_the_accept(sim):
     bot = sim()
-    bot.store.add_accepted(THEM)
     bot.api.add("t", at=now_ms(-7200))
-    bot.api.add("t", text="now we're connected")
-    asyncio.run(settle(bot))
+    bot.api.add("t", text="sent before the invite", at=now_ms(-1200))
+    bot.api.invitations = [invite("i1", now_ms(-2))]
+    asyncio.run(bot.check_invitations())
+    restarted = sim(api=bot.api, store=bot.store)
+    asyncio.run(settle(restarted))
+    assert bot.api.sent == []
+    time.sleep(0.01)
+    bot.api.add("t", text="sent after the invite")
+    asyncio.run(settle(restarted))
     assert len(bot.api.sent) == 1
+    assert restarted.brain.calls[-1] == ["sent after the invite"]
 
 
 @pytest.mark.parametrize("fields", [{"group": True}, {"org": True}, {"categories": ["SPAM"]}])
@@ -271,7 +278,7 @@ def invite(urn, sent_at, kind="CONNECTION"):
     return Invitation(urn, urn, "secret", THEM, sent_at, kind, "Sam")
 
 
-def test_new_invite_is_accepted_once_and_the_person_recorded(sim):
+def test_new_invite_is_accepted_once(sim):
     bot = sim()
     bot.api.invitations = [invite("i1", now_ms(-2))]
     asyncio.run(bot.check_invitations())

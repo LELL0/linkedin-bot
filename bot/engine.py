@@ -43,6 +43,7 @@ class Engine:
         self.hot_until = 0.0
         self.last_ok = time.time()
         self.trigger = "poll"  # What started the current check: poll or realtime.
+        self.invite_trigger = "poll"
         self.replies_sent = 0
         self.accepted = 0
 
@@ -53,7 +54,7 @@ class Engine:
         self.scope = Scope(CONFIG.reply_scope, self.store.watermark(), self.api.self_id)
         self.brain = Brain(self.api.first_name, self.api.headline)
         log.info("Running. scope=%s dry_run=%s", self.scope.mode, CONFIG.dry_run)
-        await asyncio.gather(self.poll_loop(), self.maintenance_loop())
+        await asyncio.gather(self.poll_loop(), self.invite_loop(), self.maintenance_loop())
 
     async def wait_for_session(self) -> None:
         """Hold until a person has fixed a logout or checkpoint."""
@@ -67,7 +68,6 @@ class Engine:
     async def poll_loop(self) -> None:
         while True:
             try:
-                await self.check_invitations()
                 await self.check_threads()
                 self.last_ok = time.time()
             except AuthError as error:
@@ -76,6 +76,22 @@ class Engine:
             except Exception:
                 log.exception("Poll failed")
             await self.sleep_until_next_poll()
+
+    async def invite_loop(self) -> None:
+        while True:
+            try:
+                await self.check_invitations()
+            except AuthError as error:
+                log.error("Auth problem on invitations: %s", error)  # poll_loop recovers.
+            except Exception:
+                log.exception("Invitation check failed")
+            delay = CONFIG.invite_poll_s * random.uniform(0.8, 1.2)
+            try:
+                await asyncio.wait_for(self.session.invite_wake.wait(), timeout=delay)
+                self.invite_trigger = "realtime"
+            except TimeoutError:
+                self.invite_trigger = "poll"
+            self.session.invite_wake.clear()
 
     async def sleep_until_next_poll(self) -> None:
         hot = time.time() < self.hot_until
@@ -129,7 +145,7 @@ class Engine:
                     "detect_s": round(checked_at - sent, 2),
                     "action_s": round(now - checked_at, 2),
                     "via": via,
-                    "trigger": self.trigger,
+                    "trigger": self.invite_trigger,
                 }
                 metrics.record("accept", **timing)
                 log.info("Accepted invitation: %s", timing)
@@ -180,7 +196,12 @@ class Engine:
         thread.messages = history
         if not in_scope(thread, self.scope, pre_existing, self.store.is_accepted):
             return history, []
-        return history, unanswered(thread, self.scope, self.store.is_answered)
+        pending = unanswered(thread, self.scope, self.store.is_answered)
+        if pre_existing and self.scope.mode != "all":
+            # An old thread opened by an accept only counts from that moment on.
+            since = max((self.store.accepted_at(p) for p in thread.participants), default=0)
+            pending = [m for m in pending if m.delivered_at > since]
+        return history, pending
 
     async def wait_for_quiet(self, thread: Thread) -> None:
         """Let a burst finish so it gets one reply, without waiting past the limit."""
