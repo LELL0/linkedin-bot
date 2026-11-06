@@ -17,6 +17,10 @@ class Config:
     db_path: Path = DATA_DIR / "state.db"
     log_path: Path = DATA_DIR / "bot.log"
     metrics_path: Path = DATA_DIR / "metrics.jsonl"
+    status_path: Path = DATA_DIR / "status.json"
+    # "chrome" uses installed Google Chrome; "chromium" uses Playwright's own Chromium (servers, arm64).
+    browser_channel: str = os.environ.get("BOT_BROWSER_CHANNEL", "chrome")
+    chromium_sandbox: bool = os.environ.get("BOT_CHROMIUM_SANDBOX", "0") == "1"
     reply_scope: str = os.environ.get("REPLY_SCOPE", "new_threads")
     dry_run: bool = os.environ.get("DRY_RUN", "0") == "1"
     # Any OpenAI-style chat API. The first model that answers is used.
