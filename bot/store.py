@@ -15,6 +15,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS accepted_people (profile_id TEXT PRIMARY KEY, at_ms INTEGER);
             CREATE TABLE IF NOT EXISTS seen_invites (id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS answered (message_urn TEXT PRIMARY KEY, at_ms INTEGER);
+            CREATE TABLE IF NOT EXISTS new_threads (thread_urn TEXT PRIMARY KEY);
             """
         )
         self.db.commit()
@@ -49,6 +50,12 @@ class Store:
 
     def is_seen_invite(self, invite_id: str) -> bool:
         return self._has("SELECT 1 FROM seen_invites WHERE id = ?", invite_id)
+
+    def add_new_thread(self, thread_urn: str) -> None:
+        self._add("INSERT OR IGNORE INTO new_threads VALUES (?)", thread_urn)
+
+    def is_new_thread(self, thread_urn: str) -> bool:
+        return self._has("SELECT 1 FROM new_threads WHERE thread_urn = ?", thread_urn)
 
     def mark_answered(self, message_urns: list[str]) -> None:
         now = int(time.time() * 1000)

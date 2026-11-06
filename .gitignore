@@ -1,6 +1,6 @@
 # Secrets and local state never belong in this repository.
 .env
-.env.example
+.env.*
 data/
 logs/
 *.db
