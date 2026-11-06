@@ -207,7 +207,8 @@ class Brain:
         prompt = build_prompt(history, pending, self_id, sender)
 
         question, draft = await asyncio.gather(self._classify(turns), self._draft(prompt))
-        if is_blocked(question):
+        # S16 is about what we say, so a question about a meeting still gets a drafted reply.
+        if is_blocked(question) and question[1] != {"S16"}:
             log.info("Question blocked: %s", sorted(question[1]))
             return refusal_for(question, last_message)
 
