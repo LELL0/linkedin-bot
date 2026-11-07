@@ -27,6 +27,30 @@ Replies go out under a real person's name, so nothing is sent unchecked:
 
 `tests/test_guard_flow.py` runs all of this against a fake model.
 
+## Staying under LinkedIn's radar
+
+LinkedIn signs out and restricts accounts that make requests at a machine's pace. The bot
+is slow on purpose, and each limit can be changed in `.env`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `ACTIVE_HOURS` | `8-24` | Local hours when the bot works. Outside them it makes no requests; what arrived is answered in the morning. `8-2` runs past midnight. |
+| `IDLE_POLL_S` | `120` | Inbox check when nothing is going on. Realtime events still wake it sooner. |
+| `INVITE_POLL_S` | `900` | Invitation check. |
+| `MIN_CHECK_GAP_S` | `15` | Never two checks closer than this, however many realtime events arrive. |
+| `ACCEPT_DELAY_S` | `180-2400` | An invite is accepted this many seconds after it was sent (fixed per invite). |
+| `REPLY_DELAY_S` | `25-150` | Wait before reading and answering, plus typing time for the reply's length. |
+| `MAX_ACCEPTS_PER_DAY` | `20` | Then the rest wait until tomorrow, with a Telegram alert. |
+| `MAX_REPLIES_PER_DAY` | `40` | Same for replies. |
+
+When LinkedIn rejects the session (401, 403, a redirect to the login page), every loop stops
+until someone signs in again, and then waits 5 minutes before the first request. HTTP 429,
+999 and 5xx answers stop all requests for 5 minutes, doubling each time in a row up to 4 hours.
+Chrome starts without Playwright's `--enable-automation` flag.
+
+Run the bot from the network the account normally uses. A session copied to a cloud
+server shows up from a datacenter IP in another country, which LinkedIn treats as suspicious.
+
 ## Unusual messages
 
 | Message | Behaviour |
