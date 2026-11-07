@@ -30,6 +30,14 @@ class Store:
         self.db.commit()
         return now
 
+    def get_meta(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+        self.db.commit()
+
     def _add(self, sql: str, *values) -> None:
         self.db.execute(sql, values)
         self.db.commit()
