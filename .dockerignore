@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+.env.*
+data
+deploy/data
+deploy/.env
+**/__pycache__
+.pytest_cache
+PLAN.md

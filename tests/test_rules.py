@@ -229,3 +229,31 @@ def test_every_fixed_reply_is_a_plain_string():
         assert isinstance(refusal_for((True, categories), "hello"), str)
     for problem in ("leak", "claims_human", "admits_automation", "new_contact_or_link"):
         assert isinstance(replacement_for(problem), str)
+
+
+def test_human_claims_in_new_wordings_are_caught():
+    for reply in ("just a fellow human here", "not a bot, promise", "real person here", "human here"):
+        assert output_problem(reply, "") == "claims_human", reply
+
+
+def test_automation_check_ignores_talk_about_automation_work():
+    for reply in ("open to freelance security automation work", "I build automated pipelines"):
+        assert output_problem(reply, "") is None, reply
+    assert output_problem("you're talking to an automated assistant", "") == "admits_automation"
+
+
+def test_echoed_transcript_keeps_only_the_first_turn():
+    assert clean_reply("You: hey there <Them: yo / You: more") == "hey there"
+
+
+def test_missing_script_spots_a_language_switch():
+    from bot.brain import missing_script
+
+    assert missing_script("مرحبا، ما هي التقنيات", "Python mostly") == "Arabic"
+    assert missing_script("مرحبا", "مرحبا Python") is None
+    assert missing_script("Hola, ¿qué tal?", "good thanks") is None
+
+
+def test_trailing_customer_service_sentence_is_dropped():
+    assert clean_reply("I'm away from my desk right now. How can I help you?") == "I'm away from my desk right now"
+    assert clean_reply("How can I help?") == "How can I help?"

@@ -72,11 +72,14 @@ class Session:
     async def start(self, url: str = HOME_URL) -> None:
         CONFIG.profile_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
+        channel = None if CONFIG.browser_channel == "chromium" else CONFIG.browser_channel
         self.context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(CONFIG.profile_dir),
-            channel="chrome",
+            channel=channel,
             headless=False,
             no_viewport=True,
+            chromium_sandbox=CONFIG.chromium_sandbox,
+            args=["--disable-dev-shm-usage"] if channel is None else [],
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.page.on("request", self._learn_from_request)

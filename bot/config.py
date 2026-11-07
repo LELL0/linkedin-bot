@@ -17,6 +17,12 @@ class Config:
     db_path: Path = DATA_DIR / "state.db"
     log_path: Path = DATA_DIR / "bot.log"
     metrics_path: Path = DATA_DIR / "metrics.jsonl"
+    status_path: Path = DATA_DIR / "status.json"
+    # Facts the bot may state about the owner. Private: kept with the data, not in the repo.
+    profile_path: Path = Path(os.environ.get("BOT_PROFILE", DATA_DIR / "profile.md"))
+    # "chrome" uses installed Google Chrome; "chromium" uses Playwright's own Chromium (servers, arm64).
+    browser_channel: str = os.environ.get("BOT_BROWSER_CHANNEL", "chrome")
+    chromium_sandbox: bool = os.environ.get("BOT_CHROMIUM_SANDBOX", "0") == "1"
     reply_scope: str = os.environ.get("REPLY_SCOPE", "new_threads")
     dry_run: bool = os.environ.get("DRY_RUN", "0") == "1"
     # Any OpenAI-style chat API. The first model that answers is used.
@@ -25,7 +31,7 @@ class Config:
     ai_models: tuple[str, ...] = tuple(
         os.environ.get(
             "AI_MODELS",
-            "qwen/qwen3.8-27b,openai/gpt-oss-120b,allam-2-7b",
+            "qwen/qwen3.8-27b,openai/gpt-oss-120b",
         ).split(",")
     )
     # The first guard model stays out of ai_models, so answers can't use up its quota.

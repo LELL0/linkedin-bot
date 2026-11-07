@@ -94,6 +94,7 @@ def sim(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
     monkeypatch.setattr(engine_module, "alert", lambda text: None)
+    monkeypatch.setattr(engine_module, "write_status", lambda *a, **k: None)
 
     def build(api=None, mode="new_threads", store=None):
         bot = Engine.__new__(Engine)
@@ -105,6 +106,7 @@ def sim(tmp_path, monkeypatch):
         bot.workers, bot.recheck, bot.seen_activity = {}, set(), {}
         bot.hot_until, bot.last_ok, bot.trigger, bot.invite_trigger = 0.0, time.time(), "poll", "poll"
         bot.replies_sent = bot.accepted = 0
+        bot.state = "running"
         return bot
 
     return build
