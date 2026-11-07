@@ -29,6 +29,7 @@ COMMANDS = [
     ("pause", "Stop accepting and answering until /resume"),
     ("resume", "Start accepting and answering again"),
     ("replies", "Each message and the reply sent: /replies on or off"),
+    ("catchup", "Answer unanswered messages from the last N days: /catchup 3, /catchup stop"),
     ("verbose", "The bot's log while it runs: /verbose 0-5 (0 off, 5 everything)"),
     ("help", "List the commands"),
 ]
@@ -262,8 +263,31 @@ class TelegramControl:
                             "stops it." if on else "Replies off.")
         elif command == "/verbose":
             await self.set_verbose(argument)
+        elif command == "/catchup":
+            await self.catchup(argument)
         else:
             await self.send("Unknown command. /help lists them.")
+
+    async def catchup(self, argument: str) -> None:
+        engine = self.engine
+        if argument == "stop":
+            await self.send("Stopping the catch-up." if engine.stop_catchup()
+                            else "No catch-up is going.")
+            return
+        try:
+            days = float(argument)
+        except ValueError:
+            days = 0
+        if not 0 < days <= 30:
+            await self.send("Use /catchup with a number of days from 1 to 30, e.g. /catchup 3. "
+                            "It answers unanswered messages from that time, older conversations "
+                            "included. /catchup stop cancels.")
+            return
+        if engine.start_catchup(days, self.send):
+            await self.send(f"Catch-up: looking for unanswered messages from the last {days:g} "
+                            "days. The list comes next.")
+        else:
+            await self.send("A catch-up is already going. /catchup stop cancels it.")
 
     def status_text(self) -> str:
         engine = self.engine

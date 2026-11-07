@@ -73,7 +73,10 @@ class Engine:
         self.backoff_until = 0.0  # No LinkedIn request before this time.
         self.failures = 0  # Push-backs in a row; each one doubles the wait.
         self.last_check = 0.0
-        self.capped: set[str] = set()  # Daily limits already announced today.
+        self.capped: set[str] = set()
+        # /catchup: thread urn -> answer messages after this time (ms), whatever the scope.
+        self.catchup_since: dict[str, int] = {}
+        self.catchup_task: asyncio.Task | None = None  # Daily limits already announced today.
         self.asleep = False
         # Owner settings from Telegram, kept across restarts.
         self.paused = self.store.get_meta("paused") == "1"
@@ -208,6 +211,92 @@ class Engine:
         await self.session.page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
         await self.wait_for_session()
 
+    async def unanswered_since(self, days: float) -> list[Thread]:
+        """One-to-one threads whose last message is theirs, unanswered, from the last `days`."""
+        since = int((time.time() - days * 86400) * 1000)
+        found: dict[str, Thread] = {}
+        for category in INBOX_CATEGORIES:
+            before = None
+            for _ in range(10):  # 20 threads a page
+                await asyncio.sleep(random.uniform(3, 8) if before else 0)
+                threads = await self.api.list_threads(category, before)
+                for thread in threads:
+                    if thread.last_activity_at >= since:
+                        found.setdefault(thread.urn, thread)
+                if len(threads) < 20 or min(t.last_activity_at for t in threads) < since:
+                    break
+                before = min(t.last_activity_at for t in threads)
+        result = []
+        for thread in found.values():
+            if thread.group_chat or thread.has_organization or "SPAM" in thread.categories:
+                continue
+            if thread.urn in self.workers:
+                continue  # Already being answered.
+            await asyncio.sleep(random.uniform(2, 5))
+            thread.messages = await self.api.list_messages(thread.urn)
+            scope = Scope("all", since, self.scope.self_id)
+            if unanswered(thread, scope, self.store.is_answered):
+                result.append(thread)
+        return sorted(result, key=lambda t: t.last_activity_at)
+
+    def start_catchup(self, days: float, report) -> bool:
+        """Start answering old unanswered messages. False if a catch-up is already going."""
+        if self.catchup_task and not self.catchup_task.done():
+            return False
+        self.catchup_task = asyncio.create_task(self.catchup(days, report))
+        return True
+
+    def stop_catchup(self) -> bool:
+        if self.catchup_task and not self.catchup_task.done():
+            self.catchup_task.cancel()
+            return True
+        return False
+
+    async def catchup(self, days: float, report) -> None:
+        """Answer every unanswered message of the last `days`, one thread at a time with a
+        long pause between them, within active hours, daily limits and back-offs."""
+        try:
+            while not await self.may_call():
+                pass
+            since = int((time.time() - days * 86400) * 1000)
+            threads = await self.unanswered_since(days)
+            if not threads:
+                await report(f"Catch-up: no unanswered messages in the last {days:g} days.")
+                return
+            names = ", ".join(
+                next(iter(t.names.values()), "?") for t in threads
+            )
+            low, high = CONFIG.catchup_gap_s
+            await report(
+                f"Catch-up: {len(threads)} conversation(s) with unanswered messages from the last "
+                f"{days:g} days: {names}. Answering one every {low / 60:.0f}-{high / 60:.0f} min. "
+                "/catchup stop cancels."
+            )
+            answered = 0
+            for number, thread in enumerate(threads):
+                if number:
+                    await asyncio.sleep(random.uniform(low, high))
+                while not await self.may_call():
+                    pass
+                if self.at_limit("replies", CONFIG.max_replies_per_day):
+                    await report(f"Catch-up stopped at the daily reply limit: {answered} answered, "
+                                 f"{len(threads) - number} left. Send /catchup again tomorrow.")
+                    return
+                before = self.replies_sent
+                self.catchup_since[thread.urn] = since
+                try:
+                    await self.answer_thread(thread, time.time(), "catchup")
+                finally:
+                    self.catchup_since.pop(thread.urn, None)
+                answered += self.replies_sent > before
+            await report(f"Catch-up done: {answered} of {len(threads)} answered.")
+        except asyncio.CancelledError:
+            await report("Catch-up cancelled.")
+            raise
+        except Exception as error:
+            await self.on_error(error, "catch-up")
+            await report(f"Catch-up stopped: {error}")
+
     async def maintenance_loop(self) -> None:
         last_refresh = time.time()
         while True:
@@ -330,6 +419,13 @@ class Engine:
 
     async def pending_for(self, thread: Thread) -> tuple[list[Message], list[Message]]:
         history = await self.api.list_messages(thread.urn)
+        since = self.catchup_since.get(thread.urn)
+        if since is not None:  # Asked for with /catchup: older threads count too.
+            thread.messages = history
+            if thread.group_chat or thread.has_organization or "SPAM" in thread.categories:
+                return history, []
+            scope = Scope("all", since, self.scope.self_id)
+            return history, unanswered(thread, scope, self.store.is_answered)
         pre_existing = not self.store.is_new_thread(thread.urn) and predates_start(
             history, self.scope.watermark, MESSAGE_PAGE
         )

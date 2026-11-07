@@ -42,6 +42,13 @@ is slow on purpose, and each limit can be changed in `.env`:
 | `INVITE_WINDOW` | `9-11` | Invitations are handled once a day, at a random time in this window: every pending one is accepted. |
 | `ACCEPT_GAP_S` | `20-90` | Pause between two accepts in that daily round. |
 | `MAX_ACCEPTS_PER_DAY` | `0` | 0 accepts them all; a number caps the daily round. |
+| `CATCHUP_GAP_S` | `90-300` | Pause between two conversations answered by `/catchup`. |
+
+Older conversations (started before the bot) are never answered on their own. Send
+`/catchup 3` on Telegram to answer every unanswered one-to-one message from the last 3 days
+(1-30), one conversation at a time, within the active hours and the daily reply limit. The bot
+first sends the list of names. A reply to a message older than 3 hours may say sorry for the
+late answer. `/catchup stop` cancels.
 
 When LinkedIn rejects the session (401, 403, a redirect to the login page), every loop stops
 until someone signs in again, and then waits 5 minutes before the first request. HTTP 429,
