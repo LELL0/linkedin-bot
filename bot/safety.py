@@ -29,18 +29,18 @@ Answer with exactly "safe", or "unsafe" then a new line with the category codes 
 DRAFT_ONLY_CATEGORIES = {"S15", "S16"}
 
 REFUSAL = (
-    "let's keep this professional",
-    "I'd rather keep this conversation professional",
-    "that's not something I can help with, let's keep it professional",
+    "I'd rather keep our conversation professional, but happy to talk about work anytime",
+    "let's keep things professional, thanks for understanding",
+    "that's not something I can help with, but I'm glad to chat about work",
 )
 REFUSAL_SELF_HARM = (
     "I'm really sorry you're going through this. I can't help with that, but you don't have "
     "to face it alone. Please call your local emergency number or reach someone you trust right now."
 )
 REFUSAL_SETUP = (
-    "let's keep it professional, was there something work related you wanted to discuss?",
-    "I'd rather stick to professional topics here",
-    "let's keep this to work topics",
+    "I'd rather keep this to professional topics, was there something work related on your mind?",
+    "let's keep it to work topics, happy to help there",
+    "I'll pass on that one, but glad to talk about work",
 )
 REFUSAL_SETUP_AR = "دعنا نبقي الحديث في الإطار المهني"
 HOLD_COMMITMENT = (
@@ -50,9 +50,9 @@ HOLD_COMMITMENT = (
 )
 # For "are you a bot?": neither confirms nor denies. Claiming to be human is never allowed.
 DEFLECT = (
-    "why do you ask, what did you want to talk about",
-    "let's keep it professional, what did you want to discuss",
-    "what makes you ask? anything work related I can help with",
+    "good question, what did you want to chat about?",
+    "what made you ask? happy to talk about whatever you had in mind",
+    "ha, fair question. what did you want to discuss?",
 )
 
 # Used when a reply can't be produced or checked. It says nothing that could need checking.
