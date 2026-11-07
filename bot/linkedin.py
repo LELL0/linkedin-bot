@@ -70,9 +70,10 @@ class LinkedIn:
         if not self.self_id:
             raise RuntimeError("Could not read own profile id")
 
-    async def list_threads(self, category: str) -> list[Thread]:
+    async def list_threads(self, category: str, before: int | None = None) -> list[Thread]:
+        """The 20 latest threads, or the 20 before `before` (ms), to page further back."""
         mailbox = quote(self.self_urn, safe="")
-        now = int(time.time() * 1000)
+        now = before or int(time.time() * 1000)
         query = f"(predicateUnions:List((conversationCategoryPredicate:(category:{category}))))"
         variables = f"(mailboxUrn:{mailbox},lastUpdatedBefore:{now},count:20,query:{query})"
         url = f"{MESSAGING_GRAPHQL}?queryId={QUERY_CONVERSATIONS}&variables={variables}"

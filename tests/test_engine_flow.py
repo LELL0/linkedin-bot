@@ -43,7 +43,7 @@ class FakeLinkedIn:
         return Thread(urn, last, fields.get("group", False), fields.get("categories", []),
                       [ME, THEM], fields.get("org", False), {THEM: "Sam"})
 
-    async def list_threads(self, category):
+    async def list_threads(self, category, before=None):
         return [self.thread(urn) for urn in self.threads] if category == "PRIMARY_INBOX" else []
 
     async def list_messages(self, urn, count=30):
@@ -91,7 +91,7 @@ def sim(tmp_path, monkeypatch):
     config = dataclasses.replace(
         CONFIG, dry_run=False, debounce_quiet_s=0.05, debounce_max_s=0.4,
         metrics_path=tmp_path / "metrics.jsonl", reply_delay_s=(0.0, 0.0),
-        accept_gap_s=(0.0, 0.0), active_hours=(0.0, 24.0),
+        accept_gap_s=(0.0, 0.0), active_hours=(0.0, 24.0), catchup_gap_s=(0.0, 0.0),
     )
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
@@ -112,6 +112,7 @@ def sim(tmp_path, monkeypatch):
         bot.recovering = asyncio.Lock()
         bot.backoff_until, bot.failures, bot.last_check = 0.0, 0, 0.0
         bot.capped, bot.asleep = set(), False
+        bot.catchup_since, bot.catchup_task = {}, None
         bot.paused = bot.replies_feed = False
         bot.telegram = SimpleNamespace(reply_sent=_no_feed)
         return bot
