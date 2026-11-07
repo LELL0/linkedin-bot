@@ -29,10 +29,9 @@ def test_active_hours_plain_and_past_midnight(monkeypatch):
 
 
 def test_defaults_are_slow():
-    assert CONFIG.invite_poll_s >= 300
-    assert CONFIG.idle_poll_s >= 60
-    assert CONFIG.min_check_gap_s >= 10
-    assert CONFIG.accept_delay_s[0] >= 60
+    assert CONFIG.poll_s == (300.0, 900.0)
+    assert CONFIG.min_check_gap_s >= 60
+    assert CONFIG.max_accepts_per_day == 0
 
 
 def _invite(urn, sent_at):
@@ -40,16 +39,24 @@ def _invite(urn, sent_at):
                       sent_at=sent_at, inviter_id=f"p-{urn}", inviter_name="Sam")
 
 
-def test_fresh_invite_waits_for_its_accept_time(sim, monkeypatch):  # noqa: F811
+def test_invites_once_a_day_in_the_morning(monkeypatch):
+    _config(monkeypatch, invite_window=(9.0, 11.0))
+    day = datetime(2026, 1, 1)
+    at = engine_module.invite_time(day.date())
+    assert 9 <= at <= 11
+    assert not engine_module.invites_due("", day.replace(hour=8, minute=59))
+    assert engine_module.invites_due("", day.replace(hour=11, minute=30))
+    assert not engine_module.invites_due("2026-01-01", day.replace(hour=11, minute=30))
+
+
+def test_daily_round_accepts_every_pending_invite(sim, monkeypatch):  # noqa: F811
     bot = sim()
-    _config(monkeypatch, accept_delay_s=(600.0, 600.0))
-    bot.api.invitations = [_invite("new", now_ms(-10)), _invite("old", now_ms(-900))]
+    bot.api.invitations = [_invite(str(i), now_ms(-5)) for i in range(25)]
     asyncio.run(bot.check_invitations())
-    assert bot.api.accepted == ["old"]
-    assert bot.next_invite_due > time.time()
+    assert len(bot.api.accepted) == 25
 
 
-def test_daily_accept_limit(sim, monkeypatch):  # noqa: F811
+def test_optional_daily_accept_limit(sim, monkeypatch):  # noqa: F811
     bot = sim()
     _config(monkeypatch, max_accepts_per_day=1)
     monkeypatch.setattr(engine_module, "alert", lambda text: None)
