@@ -4,7 +4,10 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
+import zlib
+from datetime import date, datetime
 
 from . import metrics
 from .brain import Brain, render_message
@@ -23,6 +26,25 @@ MAX_REGENERATIONS = 2
 SEND_ATTEMPTS = 3
 PAGE_REFRESH_S = 45 * 60
 HEARTBEAT_S = 60
+# Answers that mean "slow down" rather than "signed out".
+PUSHBACK = re.compile(r"HTTP (429|999|5\d\d)\b")
+
+
+def in_active_hours(now: datetime | None = None) -> bool:
+    """Whether the bot may work now. A range like 8-2 runs past midnight."""
+    start, end = CONFIG.active_hours
+    now = now or datetime.now()
+    hour = now.hour + now.minute / 60
+    if start <= end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def accept_delay(urn: str) -> float:
+    """How long after it was sent an invite is accepted. Fixed per invite, so every check
+    agrees, and spread over CONFIG.accept_delay_s."""
+    low, high = CONFIG.accept_delay_s
+    return low + (high - low) * (zlib.crc32(urn.encode()) % 1000) / 999
 
 
 class Engine:
@@ -42,6 +64,13 @@ class Engine:
         self.replies_sent = 0
         self.accepted = 0
         self.state = "starting"
+        self.recovering = asyncio.Lock()
+        self.backoff_until = 0.0  # No LinkedIn request before this time.
+        self.failures = 0  # Push-backs in a row; each one doubles the wait.
+        self.last_check = self.last_invite_check = 0.0
+        self.next_invite_due = 0.0
+        self.capped: set[str] = set()  # Daily limits already announced today.
+        self.asleep = False
         # Owner settings from Telegram, kept across restarts.
         self.paused = self.store.get_meta("paused") == "1"
         self.replies_feed = self.store.get_meta("replies_feed") == "1"
@@ -98,34 +127,79 @@ class Engine:
         except OSError as error:
             log.warning("Could not write status: %s", error)
 
+    async def may_call(self) -> bool:
+        """Whether LinkedIn may be called now. If not, waits a little and returns False.
+
+        Both loops ask this first, so a signed-out session, a push-back or the night
+        stops every request, not only the ones of the loop that noticed it."""
+        if self.state != "running":
+            await asyncio.sleep(5)  # wait_for_session is waiting for a person.
+            return False
+        if self.paused or time.time() < self.backoff_until or not in_active_hours():
+            self.last_ok = time.time()  # Quiet on purpose: not a stall.
+            if not self.paused and not in_active_hours() and not self.asleep:
+                log.info("Outside active hours %s: no requests until then", CONFIG.active_hours)
+            self.asleep = not in_active_hours()
+            await asyncio.sleep(min(30.0, max(1.0, self.backoff_until - time.time())))
+            return False
+        self.asleep = False
+        return True
+
+    def push_back(self, reason: str) -> None:
+        """Stop every request for a while, longer each time it happens in a row."""
+        self.failures += 1
+        wait = min(CONFIG.backoff_s * 2 ** (self.failures - 1), CONFIG.max_backoff_s)
+        wait *= random.uniform(1.0, 1.3)
+        self.backoff_until = time.time() + wait
+        alert(f"LinkedIn pushed back ({reason}). No requests for {wait / 60:.0f} min.")
+
+    async def on_error(self, error: Exception, what: str) -> None:
+        if isinstance(error, AuthError):
+            log.error("Auth problem on %s: %s", what, error)
+            async with self.recovering:
+                if self.state != "running":
+                    return  # The other loop is already recovering.
+                self.state = "needs_login"
+                await self.recover()
+                self.push_back(f"session rejected: {error}")
+        elif PUSHBACK.search(str(error)):
+            log.warning("%s: %s", what, error)
+            if time.time() >= self.backoff_until:
+                self.push_back(str(error))
+        else:
+            log.exception("%s failed", what)
+
     async def poll_loop(self) -> None:
         while True:
-            if self.paused:
-                self.last_ok = time.time()  # Paused on purpose: not a stall.
-                await asyncio.sleep(5)
+            if not await self.may_call():
                 continue
+            gap = CONFIG.min_check_gap_s - (time.time() - self.last_check)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            self.last_check = time.time()
             try:
                 await self.check_threads()
                 self.last_ok = time.time()
-            except AuthError as error:
-                log.error("Auth problem: %s", error)
-                await self.recover()
-            except Exception:
-                log.exception("Poll failed")
+                self.failures = 0
+            except Exception as error:
+                await self.on_error(error, "inbox check")
             await self.sleep_until_next_poll()
 
     async def invite_loop(self) -> None:
         while True:
-            if self.paused:
-                await asyncio.sleep(5)
+            if not await self.may_call():
                 continue
+            gap = CONFIG.min_check_gap_s - (time.time() - self.last_invite_check)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            self.last_invite_check = time.time()
             try:
                 await self.check_invitations()
-            except AuthError as error:
-                log.error("Auth problem on invitations: %s", error)  # poll_loop recovers.
-            except Exception:
-                log.exception("Invitation check failed")
+            except Exception as error:
+                await self.on_error(error, "invitation check")
             delay = CONFIG.invite_poll_s * random.uniform(0.8, 1.2)
+            if self.next_invite_due:  # An invite waits for its accept time.
+                delay = min(delay, max(CONFIG.min_check_gap_s, self.next_invite_due - time.time()))
             try:
                 await asyncio.wait_for(self.session.invite_wake.wait(), timeout=delay)
                 self.invite_trigger = "realtime"
@@ -169,19 +243,43 @@ class Engine:
                 alert(f"Stuck for {int(stalled)}s, restarting.")
                 logging.shutdown()
                 os._exit(1)  # sys.exit inside a task may not stop the loop.
-            idle = not self.workers and time.time() > self.hot_until
-            if idle and time.time() - last_refresh > PAGE_REFRESH_S:
+            idle = not self.workers and time.time() > self.hot_until and in_active_hours()
+            if idle and self.state == "running" and time.time() >= self.backoff_until and time.time() - last_refresh > PAGE_REFRESH_S:
                 await self.session.page.reload(wait_until="domcontentloaded")
                 last_refresh = time.time()
 
+    def today(self, kind: str) -> int:
+        value = self.store.get_meta(f"{kind}:{date.today().isoformat()}", "0")
+        return int(value) if value.isdigit() else 0
+
+    def count(self, kind: str) -> None:
+        self.store.set_meta(f"{kind}:{date.today().isoformat()}", str(self.today(kind) + 1))
+
+    def at_limit(self, kind: str, limit: int) -> bool:
+        """Whether today's limit for accepts or replies is used up. Tells the owner once."""
+        if self.today(kind) < limit:
+            return False
+        key = f"{kind}:{date.today().isoformat()}"
+        if key not in self.capped:
+            self.capped.add(key)
+            alert(f"Daily limit of {limit} {kind} reached. The rest wait until tomorrow.")
+        return True
+
     async def check_invitations(self) -> None:
         checked_at = time.time()
+        self.next_invite_due = 0.0
         for invitation in await self.api.list_invitations():
             if self.store.is_seen_invite(invitation.urn) or invitation.kind != "CONNECTION":
                 continue
             if invitation.sent_at <= self.scope.watermark:
                 self.store.add_seen_invite(invitation.urn)  # Older than the bot: leave it alone.
                 continue
+            due = invitation.sent_at / 1000 + accept_delay(invitation.urn)
+            if due > checked_at:  # Not yet: a person takes a while to get to it.
+                self.next_invite_due = min(self.next_invite_due or due, due)
+                continue
+            if self.at_limit("accepts", CONFIG.max_accepts_per_day):
+                return
             if CONFIG.dry_run:
                 log.info("DRY RUN: would accept an invitation")
             elif via := await self.api.accept(invitation):
@@ -194,6 +292,7 @@ class Engine:
                     "via": via,
                     "trigger": self.invite_trigger,
                 }
+                self.count("accepts")
                 metrics.record("accept", **timing)
                 log.info("Accepted invitation: %s", timing)
             else:
@@ -263,6 +362,12 @@ class Engine:
             await asyncio.sleep(min(1.0, CONFIG.debounce_quiet_s - silence + 0.05))
 
     async def _answer_thread(self, thread: Thread, noticed_at: float, trigger: str) -> None:
+        if self.at_limit("replies", CONFIG.max_replies_per_day):
+            self.seen_activity.pop(thread.urn, None)  # Answered once the limit resets.
+            return
+        # A person does not answer the second a message lands. Later messages in this wait
+        # are merged by wait_for_quiet.
+        await asyncio.sleep(random.uniform(*CONFIG.reply_delay_s))
         await self.wait_for_quiet(thread)
         quiet_at = time.time()
         history, pending = await self.pending_for(thread)
@@ -284,6 +389,8 @@ class Engine:
                 break
             pending = latest  # More arrived while thinking, so answer those too.
 
+        if CONFIG.reply_delay_s[1] > 0:  # Typing takes time; the indicator is on.
+            await asyncio.sleep(min(30.0, len(reply) / 8) * random.uniform(0.7, 1.2))
         first = pending[0].delivered_at / 1000
         trace |= {"detect_s": round(noticed_at - first, 2), "quiet_s": round(quiet_at - noticed_at, 2)}
         await self.send(thread, reply, pending, trace)
@@ -293,6 +400,12 @@ class Engine:
             log.info("DRY RUN: would send %d chars: %s", len(reply), trace)
             self.store.mark_answered([m.urn for m in pending])
             return
+        # Checked again here, and counted before sending, because other threads may have
+        # replied while this one was waiting and drafting.
+        if self.at_limit("replies", CONFIG.max_replies_per_day):
+            self.seen_activity.pop(thread.urn, None)
+            return
+        self.count("replies")
         started = time.time()
         for attempt in range(1, SEND_ATTEMPTS + 1):
             try:

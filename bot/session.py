@@ -79,7 +79,11 @@ class Session:
             headless=False,
             no_viewport=True,
             chromium_sandbox=CONFIG.chromium_sandbox,
-            args=["--disable-dev-shm-usage"] if channel is None else [],
+            # Playwright adds --enable-automation, which sets navigator.webdriver and shows
+            # the "controlled by automated software" bar. A person's Chrome has neither.
+            ignore_default_args=["--enable-automation"],
+            args=["--disable-blink-features=AutomationControlled"]
+            + (["--disable-dev-shm-usage"] if channel is None else []),
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.page.on("request", self._learn_from_request)
