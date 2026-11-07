@@ -1,6 +1,8 @@
 # LinkedIn reply bot on a server. Settings go in .env next to this file (AI_API_KEY, and
 # TG_BOT_TOKEN plus TG_CHAT_ID for alerts). Data (Chrome profile with the LinkedIn login,
 # state, logs, timings) lives in ./data.
+name: linkedin-bot
+
 services:
   linkedin-bot:
     build:
