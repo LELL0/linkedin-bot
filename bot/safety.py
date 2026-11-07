@@ -63,8 +63,10 @@ NEUTRAL_REPLIES = (
 )
 
 _ADMITS_AUTOMATION = re.compile(
-    r"\bautomated\b|\bassistant\b|\b(?:i am|i'm|im|it's|this is)\s+(?:an?\s+)?(?:\w+\s+)?(?:bot|ai)\b"
-    r"|^yes\b.*\b(?:bot|ai)\b",
+    r"\b(?:i am|i'm|im|it's|this is|you're talking to|talking to)\s+(?:an?\s+)?(?:\w+\s+)?"
+    r"(?:bot|ai|assistant|automated)\b"
+    r"|\b(?:an? )?automated (?:assistant|system|reply|replies|bot)\b"
+    r"|\bassistant (?:is )?(?:handling|answering|replying)\b|^yes\b.*\b(?:bot|ai)\b",
     re.IGNORECASE,
 )
 
@@ -76,7 +78,8 @@ _LEAK = re.compile(
 )
 _CLAIMS_HUMAN = re.compile(
     r"\b(?:i am|i'm|im)\s+(?:not\s+(?:a\s+|an\s+)?(?:bot|ai|robot|machine)\b|(?:a\s+)?(?:real\s+)?(?:human|person)\b)"
-    r"|\bnot a bot\b|\bdefinitely human\b",
+    r"|\bnot (?:a |an )?(?:bot|ai|robot)\b|\b(?:fellow|real|actual|flesh and blood) (?:human|person)\b"
+    r"|\bhuman (?:here|being here)\b|\bdefinitely human\b|\b100% human\b",
     re.IGNORECASE,
 )
 _URL = re.compile(r"(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|io|co|xyz|ru|ly|me)\b(?:/\S*)?", re.IGNORECASE)
@@ -137,3 +140,17 @@ def replacement_for(problem: str) -> str:
         case "claims_human" | "admits_automation":
             return random.choice(DEFLECT)
     return random.choice(HOLD_COMMITMENT)
+
+
+_POOLS = (REFUSAL, REFUSAL_SETUP, HOLD_COMMITMENT, DEFLECT, NEUTRAL_REPLIES)
+
+
+def fresh_variant(reply: str, said: list[str]) -> str:
+    """Swap a fixed line for an unused variant when it was already sent in this chat."""
+    if reply not in said:
+        return reply
+    for pool in _POOLS:
+        if reply in pool:
+            unused = [line for line in pool if line not in said]
+            return random.choice(unused) if unused else reply
+    return reply
