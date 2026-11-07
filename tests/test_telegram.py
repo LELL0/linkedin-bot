@@ -116,3 +116,17 @@ def test_record_levels_and_token_never_sent(monkeypatch):
     asyncio.run(tg.send_verbose())
     assert "***" in sent[-1]
     telegram.logging.getLogger().removeHandler(tg.verbose_log)
+
+
+def test_catchup_command_checks_days_and_stop(monkeypatch):
+    tg, engine, sent = control(monkeypatch)
+    started = []
+    engine.start_catchup = lambda days, report: started.append(days) or True
+    engine.stop_catchup = lambda: False
+    asyncio.run(tg.handle("/catchup"))
+    asyncio.run(tg.handle("/catchup 99"))
+    assert started == [] and "1 to 30" in sent[-1]
+    asyncio.run(tg.handle("/catchup 3"))
+    assert started == [3.0]
+    asyncio.run(tg.handle("/catchup stop"))
+    assert "No catch-up" in sent[-1]

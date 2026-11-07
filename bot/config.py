@@ -64,6 +64,8 @@ class Config:
     active_hours: tuple[float, float] = _range("ACTIVE_HOURS", "8-24")
     # A person does not answer the second a message is seen.
     reply_delay_s: tuple[float, float] = _range("REPLY_DELAY_S", "25-150")
+    # /catchup: pause between two old conversations it answers.
+    catchup_gap_s: tuple[float, float] = _range("CATCHUP_GAP_S", "90-300")
     max_accepts_per_day: int = int(os.environ.get("MAX_ACCEPTS_PER_DAY", "0"))  # 0: all
     max_replies_per_day: int = int(os.environ.get("MAX_REPLIES_PER_DAY", "40"))
     # Waits after LinkedIn pushes back (429, 999, 5xx) or rejects the session, doubling
