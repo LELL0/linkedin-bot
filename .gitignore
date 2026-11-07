@@ -18,3 +18,4 @@ __pycache__/
 .pytest_cache/
 deploy/data/
 deploy/.env
+profile.md

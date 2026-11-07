@@ -1,0 +1,7 @@
+- Role: what you do, in one line
+- Work: employer or kind of company, remote or on site
+- Experience: years, main areas
+- Side projects: names and one line each
+- Based in: country or city; time zone
+- Languages: the ones you speak
+- Open to: new roles, freelance, relocation, or not
