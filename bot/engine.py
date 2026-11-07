@@ -45,6 +45,8 @@ class Engine:
         # Owner settings from Telegram, kept across restarts.
         self.paused = self.store.get_meta("paused") == "1"
         self.replies_feed = self.store.get_meta("replies_feed") == "1"
+        verbose = self.store.get_meta("verbose", "0")
+        self.verbose = int(verbose) if verbose.isdigit() else 0
         self.telegram = TelegramControl(self)
 
     async def run(self) -> None:
@@ -68,6 +70,10 @@ class Engine:
     def set_replies_feed(self, on: bool) -> None:
         self.replies_feed = on
         self.store.set_meta("replies_feed", "1" if on else "0")
+
+    def set_verbose(self, level: int) -> None:
+        self.verbose = level
+        self.store.set_meta("verbose", str(level))
 
     async def wait_for_session(self) -> None:
         """Hold until a person has fixed a logout or checkpoint."""

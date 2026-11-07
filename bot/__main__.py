@@ -31,6 +31,9 @@ def setup_logging() -> None:
         ],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # /verbose 5 makes the root logger keep debug records; the console and file stay at INFO.
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(logging.INFO)
 
 
 def main() -> None:

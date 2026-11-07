@@ -64,3 +64,55 @@ def test_strangers_are_ignored(monkeypatch):
     except asyncio.CancelledError:
         pass
     assert engine.paused is False and sent == []
+
+
+def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
+    tg, engine, sent = control(monkeypatch)
+    tg.token = "123:FAKETOKEN"
+    engine.verbose = 0
+    engine.set_verbose = lambda level: setattr(engine, "verbose", level)
+    asyncio.run(tg.handle("/verbose 2"))
+    assert engine.verbose == 2 and "Verbose 2" in sent[-1] and "2 min" in sent[-1]
+    log = telegram.logging.getLogger("bot.engine")
+    for text in ("Accepted invitation: {}", "Draft rejected: too long", "alive: accepted=1"):
+        tg.verbose_log.emit(log.makeRecord("bot.engine", 20, __file__, 1, text, (), None))
+    tg.verbose_log.emit(log.makeRecord("bot.session", 30, __file__, 1, "Accept failed", (), None))
+    asyncio.run(tg.send_verbose())
+    assert "Accepted invitation" in sent[-1] and "Accept failed" in sent[-1]
+    assert "Draft rejected" not in sent[-1] and "alive" not in sent[-1]
+    count = len(sent)
+    asyncio.run(tg.send_verbose())  # nothing new: no empty message
+    assert len(sent) == count
+    for wrong in ("/verbose loud", "/verbose 6"):
+        asyncio.run(tg.handle(wrong))
+        assert engine.verbose == 2 and "level from 0 to 5" in sent[-1]
+    asyncio.run(tg.handle("/verbose"))
+    assert "Verbose level: <b>2</b>" in sent[-1]
+    asyncio.run(tg.handle("/verbose off"))
+    assert engine.verbose == 0
+    asyncio.run(tg.handle("/status"))
+    assert "Verbose: 0" in sent[-1]
+    telegram.logging.getLogger().removeHandler(tg.verbose_log)
+    telegram.apply_log_level(0)
+
+
+def test_record_levels_and_token_never_sent(monkeypatch):
+    make = telegram.logging.getLogger("x").makeRecord
+
+    def level(name, levelno, text):
+        return telegram.record_level(make(name, levelno, __file__, 1, text, (), None))
+
+    assert level("bot.session", 40, "boom") == 1
+    assert level("bot.engine", 20, "Replied: x") == 2
+    assert level("bot.brain", 20, "Draft blocked: x") == 3
+    assert level("bot.engine", 20, "alive: accepted=0") == 4
+    assert level("bot.engine", 10, "detail") == 5
+    assert level("playwright", 20, "x") == 5
+    assert level("httpx", 40, "POST https://api.telegram.org/botSECRET/x") == 6
+    tg, engine, sent = control(monkeypatch)
+    engine.verbose = 5
+    tg.token = "123:FAKETOKEN"
+    tg.verbose_log.lines.append((1, "url /bot123:FAKETOKEN/x"))
+    asyncio.run(tg.send_verbose())
+    assert "***" in sent[-1]
+    telegram.logging.getLogger().removeHandler(tg.verbose_log)
