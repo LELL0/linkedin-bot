@@ -7,7 +7,7 @@ import random
 import time
 
 from . import metrics
-from .brain import Brain
+from .brain import Brain, render_message
 from .config import CONFIG
 from .health import STALE_POLL_S, alert, start_watchdog, write_status
 from .guard import Scope, in_scope, predates_start, unanswered
@@ -15,6 +15,7 @@ from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
 from .session import Session
 from .store import Store
+from .telegram import TelegramControl
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ class Engine:
         self.replies_sent = 0
         self.accepted = 0
         self.state = "starting"
+        # Owner settings from Telegram, kept across restarts.
+        self.paused = self.store.get_meta("paused") == "1"
+        self.replies_feed = self.store.get_meta("replies_feed") == "1"
+        self.telegram = TelegramControl(self)
 
     async def run(self) -> None:
         self.heartbeat = time.time()
@@ -51,7 +56,18 @@ class Engine:
         self.scope = Scope(CONFIG.reply_scope, self.store.watermark(), self.api.self_id)
         self.brain = Brain(self.api.first_name, self.api.headline)
         log.info("Running. scope=%s dry_run=%s", self.scope.mode, CONFIG.dry_run)
-        await asyncio.gather(self.poll_loop(), self.invite_loop(), self.maintenance_loop())
+        await asyncio.gather(
+            self.poll_loop(), self.invite_loop(), self.maintenance_loop(), self.telegram.loop()
+        )
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+        self.store.set_meta("paused", "1" if paused else "0")
+        log.info("Paused" if paused else "Resumed")
+
+    def set_replies_feed(self, on: bool) -> None:
+        self.replies_feed = on
+        self.store.set_meta("replies_feed", "1" if on else "0")
 
     async def wait_for_session(self) -> None:
         """Hold until a person has fixed a logout or checkpoint."""
@@ -78,6 +94,10 @@ class Engine:
 
     async def poll_loop(self) -> None:
         while True:
+            if self.paused:
+                self.last_ok = time.time()  # Paused on purpose: not a stall.
+                await asyncio.sleep(5)
+                continue
             try:
                 await self.check_threads()
                 self.last_ok = time.time()
@@ -90,6 +110,9 @@ class Engine:
 
     async def invite_loop(self) -> None:
         while True:
+            if self.paused:
+                await asyncio.sleep(5)
+                continue
             try:
                 await self.check_invitations()
             except AuthError as error:
@@ -281,6 +304,11 @@ class Engine:
                 }
                 metrics.record("reply", **trace)
                 log.info("Replied: %s", trace)
+                others = [p for p in thread.participants if p != self.scope.self_id]
+                sender = thread.names.get(others[0], "") if others else ""
+                await self.telegram.reply_sent(
+                    sender, [render_message(m) for m in pending], reply
+                )
                 return
             except RuntimeError as error:
                 log.warning("Send attempt %d failed: %s", attempt, error)
