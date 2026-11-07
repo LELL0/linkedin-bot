@@ -59,6 +59,26 @@ uv run python -m bot doctor   # read-only check
 
 Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending or accepting, `REPLY_SCOPE` is covered below, and `AI_BASE_URL`, `AI_MODELS` and `AI_GUARD_MODELS` change the provider. Tests: `uv run pytest`. Reply samples: `uv run python -m tests.eval_replies`.
 
+## Run it on a server
+
+`deploy/` runs the bot in Docker with Chromium in a virtual screen, so it works on amd64 and arm64 servers with no desktop. Settings go in `deploy/.env` (`AI_API_KEY`, and `TG_BOT_TOKEN` plus `TG_CHAT_ID` for Telegram alerts).
+
+```bash
+cd deploy
+APP_UID=$(id -u) docker compose up -d --build
+ssh -N -L 5901:localhost:5901 your-server       # from your computer, then VNC to localhost:5901
+cat data/vnc-password                           # VNC password, created on first start
+```
+
+Sign in to LinkedIn once in the window you see over VNC; the bot carries on by itself. Data (Chrome profile, state, logs, timings) stays in `deploy/data`.
+
+Health:
+- `docker compose ps` shows `healthy` or `unhealthy`. The check (`python -m bot health`) fails when the bot is signed out, its loop stops, or LinkedIn hasn't answered for 5 minutes.
+- A watchdog thread exits the process if the loop stalls, and the bot exits after 10 minutes without a successful check, so Docker's restart policy starts it fresh.
+- Sign-outs, stalls and failed sends go to Telegram, at most once an hour per problem.
+
+Run only one copy per LinkedIn account: two would both answer every message.
+
 ## Timings
 
 Every accept and reply is written to `~/.local/share/linkedin-bot/metrics.jsonl`, with timings only and no message text.
