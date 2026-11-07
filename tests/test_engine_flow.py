@@ -89,7 +89,8 @@ class FakeBrain:
 def sim(tmp_path, monkeypatch):
     config = dataclasses.replace(
         CONFIG, dry_run=False, debounce_quiet_s=0.05, debounce_max_s=0.4,
-        metrics_path=tmp_path / "metrics.jsonl",
+        metrics_path=tmp_path / "metrics.jsonl", reply_delay_s=(0.0, 0.0),
+        accept_delay_s=(0.0, 0.0), active_hours=(0.0, 24.0),
     )
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
@@ -107,6 +108,10 @@ def sim(tmp_path, monkeypatch):
         bot.hot_until, bot.last_ok, bot.trigger, bot.invite_trigger = 0.0, time.time(), "poll", "poll"
         bot.replies_sent = bot.accepted = 0
         bot.state = "running"
+        bot.recovering = asyncio.Lock()
+        bot.backoff_until, bot.failures, bot.next_invite_due = 0.0, 0, 0.0
+        bot.last_check = bot.last_invite_check = 0.0
+        bot.capped, bot.asleep = set(), False
         bot.paused = bot.replies_feed = False
         bot.telegram = SimpleNamespace(reply_sent=_no_feed)
         return bot

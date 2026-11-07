@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+def _range(name: str, default: str) -> tuple[float, float]:
+    """"a-b" from the environment as (a, b)."""
+    low, _, high = os.environ.get(name, default).partition("-")
+    return float(low), float(high or low)
+
+
 DATA_DIR = Path(os.environ.get("BOT_DATA_DIR", Path.home() / ".local/share/linkedin-bot"))
 
 
@@ -44,12 +50,26 @@ class Config:
     # Wait for this much silence before answering, so a burst gets one reply.
     debounce_quiet_s: float = 3.0
     debounce_max_s: float = 9.0
-    # Backstop polling. The realtime wake-up is the fast path.
-    idle_poll_s: float = float(os.environ.get("IDLE_POLL_S", "12"))
-    # Invites get their own quick check, because accept speed is what matters there.
-    invite_poll_s: float = float(os.environ.get("INVITE_POLL_S", "4"))
-    hot_poll_s: float = 2.0
-    hot_window_s: float = 90.0
-
+    # Backstop polling. The realtime wake-up is the fast path. LinkedIn watches request
+    # rates per account: a check every few seconds, all day, is what gets a session
+    # signed out and the account restricted, so these stay slow on purpose.
+    idle_poll_s: float = float(os.environ.get("IDLE_POLL_S", "120"))
+    invite_poll_s: float = float(os.environ.get("INVITE_POLL_S", "900"))
+    hot_poll_s: float = 20.0
+    hot_window_s: float = 300.0
+    # Never check the inbox more often than this, even when realtime events pour in.
+    min_check_gap_s: float = float(os.environ.get("MIN_CHECK_GAP_S", "15"))
+    # Local hours (start-end, 24h clock) when the bot works. Outside them it makes no
+    # requests at all, like a person who is asleep; what arrives is answered in the morning.
+    active_hours: tuple[float, float] = _range("ACTIVE_HOURS", "8-24")
+    # A person does not accept an invite or answer a message within seconds, every time.
+    accept_delay_s: tuple[float, float] = _range("ACCEPT_DELAY_S", "180-2400")
+    reply_delay_s: tuple[float, float] = _range("REPLY_DELAY_S", "25-150")
+    max_accepts_per_day: int = int(os.environ.get("MAX_ACCEPTS_PER_DAY", "20"))
+    max_replies_per_day: int = int(os.environ.get("MAX_REPLIES_PER_DAY", "40"))
+    # Waits after LinkedIn pushes back (429, 999, 5xx) or rejects the session, doubling
+    # each time up to the maximum.
+    backoff_s: float = 300.0
+    max_backoff_s: float = 4 * 3600.0
 
 CONFIG = Config()
