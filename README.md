@@ -11,7 +11,7 @@ It is reply-only. It never writes first, and the code has no way to start a conv
 
 - **Browser:** Playwright drives real Chrome with a dedicated profile. You sign in once by hand, so the bot never stores a password.
 - **Requests:** LinkedIn has no official API for this, so every call is a `fetch` made inside the logged-in page. The CSRF token stays in the page.
-- **Detection:** events from LinkedIn's realtime stream wake the bot, and a backstop poll is the source of truth. Polling speeds up while a conversation is active.
+- **Detection:** the inbox is checked every 5-15 minutes; invitations once a day in the morning.
 - **Accepting:** the REST action first, then the newer Dash action, then the Accept button on the page. Only person-to-person invites that arrive after the bot first started are accepted.
 - **Replying:** the bot waits for 3 seconds of quiet (9 at most) so a burst gets one reply, shows typing, and checks for newer messages before sending.
 - **Model:** any OpenAI-style chat API, by default Groq's free tier. If a model is out of quota the next one in the list answers. The model has no tools, and incoming text is treated as content, never as instructions.
@@ -35,13 +35,13 @@ is slow on purpose, and each limit can be changed in `.env`:
 | Setting | Default | What it does |
 |---|---|---|
 | `ACTIVE_HOURS` | `8-24` | Local hours when the bot works. Outside them it makes no requests; what arrived is answered in the morning. `8-2` runs past midnight. |
-| `IDLE_POLL_S` | `120` | Inbox check when nothing is going on. Realtime events still wake it sooner. |
-| `INVITE_POLL_S` | `900` | Invitation check. |
-| `MIN_CHECK_GAP_S` | `15` | Never two checks closer than this, however many realtime events arrive. |
-| `ACCEPT_DELAY_S` | `180-2400` | An invite is accepted this many seconds after it was sent (fixed per invite). |
+| `POLL_S` | `300-900` | Inbox check every 5-15 minutes, random. Realtime events do not make it sooner. |
+| `MIN_CHECK_GAP_S` | `60` | Never two inbox checks closer than this. |
 | `REPLY_DELAY_S` | `25-150` | Wait before reading and answering, plus typing time for the reply's length. |
-| `MAX_ACCEPTS_PER_DAY` | `20` | Then the rest wait until tomorrow, with a Telegram alert. |
-| `MAX_REPLIES_PER_DAY` | `40` | Same for replies. |
+| `MAX_REPLIES_PER_DAY` | `40` | Then the rest wait until tomorrow, with a Telegram alert. |
+| `INVITE_WINDOW` | `9-11` | Invitations are handled once a day, at a random time in this window: every pending one is accepted. |
+| `ACCEPT_GAP_S` | `20-90` | Pause between two accepts in that daily round. |
+| `MAX_ACCEPTS_PER_DAY` | `0` | 0 accepts them all; a number caps the daily round. |
 
 When LinkedIn rejects the session (401, 403, a redirect to the login page), every loop stops
 until someone signs in again, and then waits 5 minutes before the first request. HTTP 429,

@@ -63,7 +63,8 @@ class FakeLinkedIn:
         pass
 
     async def list_invitations(self):
-        return list(self.invitations)
+        # Like LinkedIn: accepted invites leave the list, which shows 20 at a time.
+        return [i for i in self.invitations if i.urn not in self.accepted][:20]
 
     async def accept(self, invitation):
         if self.accept_fails:
@@ -90,7 +91,7 @@ def sim(tmp_path, monkeypatch):
     config = dataclasses.replace(
         CONFIG, dry_run=False, debounce_quiet_s=0.05, debounce_max_s=0.4,
         metrics_path=tmp_path / "metrics.jsonl", reply_delay_s=(0.0, 0.0),
-        accept_delay_s=(0.0, 0.0), active_hours=(0.0, 24.0),
+        accept_gap_s=(0.0, 0.0), active_hours=(0.0, 24.0),
     )
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
@@ -109,8 +110,7 @@ def sim(tmp_path, monkeypatch):
         bot.replies_sent = bot.accepted = 0
         bot.state = "running"
         bot.recovering = asyncio.Lock()
-        bot.backoff_until, bot.failures, bot.next_invite_due = 0.0, 0, 0.0
-        bot.last_check = bot.last_invite_check = 0.0
+        bot.backoff_until, bot.failures, bot.last_check = 0.0, 0, 0.0
         bot.capped, bot.asleep = set(), False
         bot.paused = bot.replies_feed = False
         bot.telegram = SimpleNamespace(reply_sent=_no_feed)
