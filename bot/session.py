@@ -12,7 +12,7 @@ import re
 from collections import Counter
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from playwright.async_api import BrowserContext, Page, Request, async_playwright
 from playwright.async_api import Error as PlaywrightError
@@ -68,6 +68,9 @@ class Session:
         # Header values copied from the site's own traffic, so they follow deploys.
         self.learned_headers: dict[str, str] = {}
         self._playwright = None
+        # Called when Chrome or the main tab closes without stop(), e.g. closed by hand over VNC.
+        self.on_closed: Callable[[str], None] | None = None
+        self._stopping = False
 
     async def start(self, url: str = HOME_URL) -> None:
         CONFIG.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -87,10 +90,18 @@ class Session:
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.page.on("request", self._learn_from_request)
+        self.context.on("close", lambda _: self._closed("Chrome closed"))
+        self.page.on("close", lambda _: self._closed("Bot tab closed"))
         await self._tap_realtime()
         await self.page.goto(url, wait_until="domcontentloaded")
 
+    def _closed(self, what: str) -> None:
+        if self._stopping or self.on_closed is None:
+            return
+        self.on_closed(what)
+
     async def stop(self) -> None:
+        self._stopping = True
         if self.context:
             await self.context.close()
         if self._playwright:

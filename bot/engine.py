@@ -88,6 +88,7 @@ class Engine:
     async def run(self) -> None:
         self.heartbeat = time.time()
         start_watchdog(lambda: self.heartbeat)
+        self.session.on_closed = self.on_browser_closed
         await self.session.start()
         await self.wait_for_session()
         await self.api.load_self()
@@ -296,6 +297,12 @@ class Engine:
         except Exception as error:
             await self.on_error(error, "catch-up")
             await report(f"Catch-up stopped: {error}")
+
+    def on_browser_closed(self, what: str) -> None:
+        """Exit so the supervisor (Docker or run.sh) starts the bot with a fresh Chrome."""
+        alert(f"{what}, restarting with a new Chrome.")
+        logging.shutdown()
+        os._exit(1)  # sys.exit inside a callback would not stop the loop.
 
     async def maintenance_loop(self) -> None:
         last_refresh = time.time()
