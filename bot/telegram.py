@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from . import metrics
+from . import metrics, settings
 from .config import CONFIG
 
 if TYPE_CHECKING:
@@ -31,6 +31,10 @@ COMMANDS = [
     ("replies", "Each message and the reply sent: /replies on or off"),
     ("catchup", "Answer unanswered messages from the last N days: /catchup 3, /catchup stop"),
     ("verbose", "The bot's log while it runs: /verbose 0-5 (0 off, 5 everything)"),
+    ("settings", "Timings, limits and other settings, and how to change them"),
+    ("set", "Change a setting: /set poll 5-15, /set max_replies 30"),
+    ("reset", "Back to the default: /reset poll, /reset all"),
+    ("interval", "Random wait between inbox checks, in minutes: /interval 5-15"),
     ("help", "List the commands"),
 ]
 HELP = "<b>LinkedIn bot</b>\n" + "\n".join(f"/{c} - {d}" for c, d in COMMANDS)
@@ -265,6 +269,15 @@ class TelegramControl:
             await self.set_verbose(argument)
         elif command == "/catchup":
             await self.catchup(argument)
+        elif command == "/settings":
+            await self.send(self.settings_text())
+        elif command == "/set":
+            await self.set_setting(words[1].lower() if len(words) > 1 else "",
+                                   " ".join(words[2:]))
+        elif command == "/interval":
+            await self.set_setting("poll", " ".join(words[1:]))
+        elif command == "/reset":
+            await self.reset_setting(argument)
         else:
             await self.send("Unknown command. /help lists them.")
 
@@ -289,6 +302,55 @@ class TelegramControl:
         else:
             await self.send("A catch-up is already going. /catchup stop cancels it.")
 
+    def settings_text(self) -> str:
+        return ("<b>Settings</b> (* changed from the default)\n<pre>"
+                f"{esc(settings.listing())}</pre>\n"
+                "Change one: /set name value, e.g. /set poll 5-15 or /set dry_run on. "
+                "Ranges are random between the two numbers. /reset name or /reset all.")
+
+    async def set_setting(self, name: str, value: str) -> None:
+        name = name.replace("-", "_")
+        if name not in settings.TUNABLES:
+            await self.send("Use /set name value. Names: "
+                            + ", ".join(settings.TUNABLES) + ". /settings shows them all.")
+            return
+        tunable = settings.TUNABLES[name]
+        if not value:
+            await self.send(f"{name} = <b>{esc(settings.show(name))}</b>\n{esc(tunable.help)}\n"
+                            f"Change it with /set {name} value.")
+            return
+        try:
+            parsed = settings.parse(name, value)
+            self.engine.change_setting(name, parsed)
+        except ValueError as error:
+            await self.send(f"Not changed: {esc(error)}.")
+            return
+        note = ""
+        if name == "scope" and parsed == "all":
+            note = ("\nThe bot may now answer in every one-to-one conversation, also ones "
+                    "you started yourself.")
+        if name == "dry_run" and parsed:
+            note = "\nNothing is sent or accepted until /set dry_run off."
+        await self.send(f"{name} = <b>{esc(settings.show(name))}</b>. Kept across restarts; "
+                        f"/reset {name} goes back to {esc(settings.show(name, settings.DEFAULTS[name]))}."
+                        + note)
+
+    async def reset_setting(self, name: str) -> None:
+        names = list(settings.TUNABLES) if name == "all" else [name.replace("-", "_")]
+        if not name or names[0] not in settings.TUNABLES:
+            await self.send("Use /reset name or /reset all. /settings lists the names.")
+            return
+        changed = [n for n in names
+                   if getattr(settings.CONFIG, settings.TUNABLES[n].field) != settings.DEFAULTS[n]]
+        for n in names:
+            self.engine.change_setting(n, None)
+        if name == "all":
+            await self.send("All settings back to their defaults"
+                            + (f" ({', '.join(changed)} changed)." if changed else "; none had "
+                               "been changed."))
+        else:
+            await self.send(f"{name} = <b>{esc(settings.show(name))}</b> (default).")
+
     def status_text(self) -> str:
         engine = self.engine
         now = time.time()
@@ -299,6 +361,8 @@ class TelegramControl:
             f"Since start: {engine.accepted} accepted, {engine.replies_sent} replies",
             f"Replies feed: {'on' if engine.replies_feed else 'off'}",
             f"Verbose: {self.verbose}",
+            f"Inbox check every {esc(settings.show('poll'))}, active {esc(settings.show('active_hours'))}"
+            + (", <b>dry run</b>" if CONFIG.dry_run else ""),
         ])
 
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:

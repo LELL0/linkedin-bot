@@ -104,10 +104,11 @@ cat data/vnc-password                           # VNC password, created on first
 Sign in to LinkedIn once in the window you see over VNC; the bot carries on by itself. Data (Chrome profile, state, logs, timings) stays in `deploy/data`.
 
 Health:
-- `docker compose ps` shows `healthy` or `unhealthy`. The check (`python -m bot health`) fails when the bot is signed out, its loop stops, or LinkedIn hasn't answered for 5 minutes.
+- `docker compose ps` shows `healthy` or `unhealthy`. The check (`python -m bot health`) fails when the bot is signed out, its loop stops, or no inbox check has succeeded for the longest poll wait (`POLL_S` max) plus 6 minutes.
 - A watchdog thread exits the process if the loop stalls, and the bot exits after 10 minutes without a successful check, so Docker's restart policy starts it fresh.
 - Sign-outs, stalls and failed sends go to Telegram, at most once an hour per problem.
 - `/verbose 0-5` sends the bot's log to Telegram while it runs: 0 off (only alerts), 1 warnings and errors (every 5 min), 2 also each accept and reply (2 min), 3 everything but the heartbeat (1 min), 4 also the heartbeat (30 s), 5 also debug lines and other libraries (30 s). Lines from httpx are never sent, because they hold the bot token. `/verbose` alone shows the level; it survives restarts.
+- `/settings` lists the settings below that can change while the bot runs, with their values. `/set name value` changes one (`/set poll 5-15`, `/set reply_delay 30-120`, `/set max_replies 30`, `/set dry_run on`, `/set scope all`), `/interval 5-15` is short for `/set poll`, and `/reset name` or `/reset all` goes back to the environment's value. Ranges are random between the two numbers, in the unit `/settings` shows (min, s or h). Changes are kept in the bot's database across restarts; a new poll interval also replaces the wait already going. Names: `poll`, `check_gap`, `reply_delay`, `active_hours`, `invite_window`, `accept_gap`, `catchup_gap`, `max_replies`, `max_accepts`, `backoff`, `max_backoff`, `dry_run`, `scope`.
 
 Run only one copy per LinkedIn account: two would both answer every message.
 

@@ -9,11 +9,11 @@ import time
 import zlib
 from datetime import date, datetime
 
-from . import metrics
+from . import metrics, settings
 from .brain import Brain, render_message
 from .config import CONFIG
-from .health import STALE_POLL_S, alert, start_watchdog, write_status
 from .guard import Scope, in_scope, predates_start, unanswered
+from .health import alert, stale_poll_s, start_watchdog, write_status
 from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
 from .session import Session
@@ -59,6 +59,9 @@ class Engine:
         self.session = Session()
         self.api = LinkedIn(self.session)
         self.store = Store(CONFIG.db_path)
+        for name in settings.load(self.store):
+            log.warning("Stored setting %s is not valid any more, back to its default", name)
+        self.poll_now = asyncio.Event()  # Set when the poll interval changes.
         self.brain: Brain | None = None
         self.scope: Scope | None = None
         self.workers: dict[str, asyncio.Task] = {}
@@ -206,7 +209,29 @@ class Engine:
             await asyncio.sleep(300)
 
     async def sleep_until_next_poll(self) -> None:
-        await asyncio.sleep(random.uniform(*CONFIG.poll_s))
+        """Wait a random time from CONFIG.poll_s. When the interval changes from Telegram, the
+        wait is drawn again from the new interval, counted from the last check."""
+        deadline = time.time() + random.uniform(*CONFIG.poll_s)
+        while (left := deadline - time.time()) > 0:
+            self.poll_now.clear()
+            try:
+                await asyncio.wait_for(self.poll_now.wait(), left)
+            except TimeoutError:
+                return
+            deadline = self.last_check + random.uniform(*CONFIG.poll_s)
+
+    def change_setting(self, name: str, value: object | None) -> None:
+        """Set (or with None, reset) a setting from Telegram and keep it across restarts."""
+        if value is None:
+            settings.reset(name, self.store)
+        else:
+            settings.apply(name, value, self.store)
+        log.info("Setting %s = %s", name, settings.show(name))
+        if name == "scope" and self.scope is not None:
+            self.scope = Scope(CONFIG.reply_scope, self.scope.watermark, self.scope.self_id)
+        if name in ("poll", "check_gap"):
+            self.poll_now.set()
+        self.write_status()
 
     async def recover(self) -> None:
         await self.session.page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
@@ -319,9 +344,10 @@ class Engine:
             )
             self.write_status()
             stalled = time.time() - self.last_ok
-            if self.state == "running" and stalled > 180:
-                alert("No successful poll for 3 minutes.")
-            if self.state == "running" and stalled > 2 * STALE_POLL_S:
+            limit = stale_poll_s()
+            if self.state == "running" and stalled > limit:
+                alert(f"No successful inbox check for over {limit / 60:.0f} minutes.")
+            if self.state == "running" and stalled > 2 * limit:
                 # Exit so the supervisor (systemd or Docker) starts a fresh browser.
                 alert(f"Stuck for {int(stalled)}s, restarting.")
                 logging.shutdown()

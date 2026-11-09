@@ -15,12 +15,21 @@ from .config import CONFIG
 log = logging.getLogger(__name__)
 
 STALE_STATUS_S = 180  # The bot rewrites the file every minute.
-STALE_POLL_S = 300  # No successful LinkedIn check for this long means it is stuck.
+
+
+def stale_poll_s() -> float:
+    """No successful LinkedIn check for this long means it is stuck. The bot waits up to
+    CONFIG.poll_s between checks on purpose (changeable from Telegram), so allow the longest
+    wait plus a check's time."""
+    return CONFIG.poll_s[1] + CONFIG.min_check_gap_s + 300
+
+
 ALERT_REPEAT_S = 3600
 
 
 def write_status(state: str, last_ok: float, **counts) -> None:
-    status = {"at": time.time(), "state": state, "last_ok": last_ok, **counts}
+    status = {"at": time.time(), "state": state, "last_ok": last_ok,
+              "stale_poll_s": stale_poll_s(), **counts}
     temporary = CONFIG.status_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(status))
     temporary.replace(CONFIG.status_path)
@@ -34,7 +43,9 @@ def problem(status: dict | None, now: float) -> str | None:
         return f"status not updated for {int(now - status.get('at', 0))}s"
     if status.get("state") == "needs_login":
         return "signed out of LinkedIn: log in over VNC"
-    if status.get("state") == "running" and now - status.get("last_ok", 0) > STALE_POLL_S:
+    # The healthcheck runs in its own process, so it takes the bot's live limit from the file.
+    limit = status.get("stale_poll_s") or stale_poll_s()
+    if status.get("state") == "running" and now - status.get("last_ok", 0) > limit:
         return f"no successful LinkedIn check for {int(now - status['last_ok'])}s"
     return None
 

@@ -17,8 +17,8 @@ def _range(name: str, default: str) -> tuple[float, float]:
 DATA_DIR = Path(os.environ.get("BOT_DATA_DIR", Path.home() / ".local/share/linkedin-bot"))
 
 
-@dataclass(frozen=True)
-class Config:
+@dataclass
+class Config:  # Not frozen: bot.settings changes some fields from Telegram.
     profile_dir: Path = DATA_DIR / "chrome-profile"
     db_path: Path = DATA_DIR / "state.db"
     log_path: Path = DATA_DIR / "bot.log"
