@@ -16,7 +16,7 @@ from .guard import Scope, in_scope, predates_start, unanswered
 from .health import alert, stale_poll_s, start_watchdog, write_status
 from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
-from .session import Session
+from .session import Session, proxy_problem
 from .store import Store
 from .telegram import TelegramControl
 
@@ -81,6 +81,7 @@ class Engine:
         self.catchup_since: dict[str, int] = {}
         self.catchup_task: asyncio.Task | None = None  # Daily limits already announced today.
         self.asleep = False
+        self.started = False  # The first wake is done and the bot knows who it is.
         # Owner settings from Telegram, kept across restarts.
         self.paused = self.store.get_meta("paused") == "1"
         self.replies_feed = self.store.get_meta("replies_feed") == "1"
@@ -92,15 +93,68 @@ class Engine:
         self.heartbeat = time.time()
         start_watchdog(lambda: self.heartbeat)
         self.session.on_closed = self.on_browser_closed
-        await self.session.start()
-        await self.wait_for_session()
+        await asyncio.gather(
+            self.start_and_poll(), self.invite_loop(), self.maintenance_loop(),
+            self.browser_loop(), self.telegram.loop(),
+        )
+
+    async def start_and_poll(self) -> None:
+        await self.wake()
         await self.api.load_self()
         self.scope = Scope(CONFIG.reply_scope, self.store.watermark(), self.api.self_id)
         self.brain = Brain(self.api.first_name, self.api.headline)
         log.info("Running. scope=%s dry_run=%s", self.scope.mode, CONFIG.dry_run)
-        await asyncio.gather(
-            self.poll_loop(), self.invite_loop(), self.maintenance_loop(), self.telegram.loop()
-        )
+        self.started = True
+        await self.poll_loop()
+
+    async def idle(self, state: str, seconds: float) -> None:
+        """Wait without touching LinkedIn, still writing the status for the watchdog."""
+        self.state = state
+        deadline = time.time() + seconds
+        while (left := deadline - time.time()) > 0:
+            self.write_status()
+            await asyncio.sleep(min(30.0, left))
+        self.write_status()
+
+    async def wake(self, jitter: bool = False) -> None:
+        """Open Chrome on LinkedIn: only within active hours, a random while after they
+        start (jitter), and only through the proxy when one is set. A person's laptop is
+        not on LinkedIn at 3 a.m., nor from a datacenter."""
+        while not in_active_hours():
+            await self.idle("asleep", 60)
+        if jitter:
+            await self.idle("asleep", random.uniform(*CONFIG.wake_jitter_s))
+        warned = False
+        while CONFIG.proxy and (problem := await asyncio.to_thread(proxy_problem, CONFIG.proxy)):
+            if not warned:
+                alert(f"Not opening LinkedIn: {problem}. Start the home tunnel; "
+                      "the bot never uses the server's own address.")
+                warned = True
+            await self.idle("no_proxy", 60)
+        if warned:
+            log.info("Proxy answers again, opening LinkedIn")
+        await self.session.start()
+        await self.wait_for_session()
+
+    async def browser_loop(self) -> None:
+        """Close Chrome for the night and open it again in the morning."""
+        while True:
+            await asyncio.sleep(60)
+            if not self.started:
+                continue  # start_and_poll opens Chrome the first time.
+            busy = self.workers or (self.catchup_task and not self.catchup_task.done())
+            if self.state == "running" and self.session.open and not in_active_hours() and not busy:
+                log.info("Outside active hours %s: closing Chrome until then", CONFIG.active_hours)
+                self.state = "asleep"
+                self.write_status()
+                await self.session.stop()
+            elif self.state == "asleep" and not self.session.open and in_active_hours():
+                try:
+                    await self.wake(jitter=True)
+                except Exception:
+                    log.exception("Could not open Chrome, trying again in 5 minutes")
+                    await self.session.stop()
+                    await self.idle("asleep", 300)
 
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
@@ -352,7 +406,7 @@ class Engine:
                 alert(f"Stuck for {int(stalled)}s, restarting.")
                 logging.shutdown()
                 os._exit(1)  # sys.exit inside a task may not stop the loop.
-            idle = not self.workers and in_active_hours()
+            idle = not self.workers and in_active_hours() and self.session.open
             if idle and self.state == "running" and time.time() >= self.backoff_until and time.time() - last_refresh > PAGE_REFRESH_S:
                 await self.session.page.reload(wait_until="domcontentloaded")
                 last_refresh = time.time()

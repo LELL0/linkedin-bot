@@ -72,5 +72,14 @@ class Config:  # Not frozen: bot.settings changes some fields from Telegram.
     # each time up to the maximum.
     backoff_s: float = 300.0
     max_backoff_s: float = 4 * 3600.0
+    # Route every LinkedIn request through this proxy, e.g. socks5://172.17.0.1:1080: a
+    # tunnel to the owner's home connection. A cloud server's address is what LinkedIn
+    # distrusts most; signed in from a datacenter, the account was signed out twice
+    # (2026-11-08 and 11-09). When set, Chrome only opens once the proxy answers, and it
+    # never falls back to the server's own address.
+    proxy: str = os.environ.get("BOT_PROXY", "")
+    # Close Chrome outside active_hours, so no LinkedIn tab stays connected all night,
+    # and open it again at a random time up to this many minutes after they start.
+    wake_jitter_s: tuple[float, float] = _range("WAKE_JITTER_S", "0-2400")
 
 CONFIG = Config()

@@ -43,6 +43,8 @@ is slow on purpose, and each limit can be changed in `.env`:
 | `ACCEPT_GAP_S` | `20-90` | Pause between two accepts in that daily round. |
 | `MAX_ACCEPTS_PER_DAY` | `0` | 0 accepts them all; a number caps the daily round. |
 | `CATCHUP_GAP_S` | `90-300` | Pause between two conversations answered by `/catchup`. |
+| `BOT_PROXY` | empty | e.g. `socks5://172.17.0.1:1080`: every LinkedIn request goes through this proxy (a tunnel to your home connection, see below). When set, Chrome opens only while the proxy answers and never falls back to the server's own address; WebRTC is kept inside the proxy too. |
+| `WAKE_JITTER_S` | `0-2400` | Chrome is closed outside `ACTIVE_HOURS` (no LinkedIn tab connected all night) and opens again at a random time up to 40 minutes after they start. |
 
 Older conversations (started before the bot) are never answered on their own. Send
 `/catchup 3` on Telegram to answer every unanswered one-to-one message from the last 3 days
@@ -100,6 +102,18 @@ APP_UID=$(id -u) docker compose up -d --build
 ssh -N -L 5901:localhost:5901 your-server       # from your computer, then VNC to localhost:5901
 cat data/vnc-password                           # VNC password, created on first start
 ```
+
+### LinkedIn through your home connection
+
+A cloud server's address is the strongest bot signal LinkedIn sees: the account was signed out twice in two days (2026-11-08, 11-09) while the bot ran from an Oracle datacenter in Frankfurt and the owner used LinkedIn from home. Send the bot's LinkedIn traffic through your home connection instead, with a reverse SOCKS tunnel from a computer at home that stays on:
+
+1. On the server, once: let the tunnel listen on Docker's bridge address and let containers reach it.
+   - `/etc/ssh/sshd_config`: `GatewayPorts clientspecified`, then `sudo systemctl reload ssh`.
+   - `sudo iptables -I INPUT -s 172.16.0.0/12 -d 172.17.0.1 -p tcp --dport 1080 -j ACCEPT` and `sudo netfilter-persistent save` (Oracle images reject other input). 172.17.0.1 is not reachable from the internet.
+2. At home: `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R 172.17.0.1:1080 your-server` (OpenSSH 7.6+ acts as the SOCKS proxy itself). Keep it running, e.g. as a systemd user service with `Restart=always`.
+3. In `deploy/.env`: `BOT_PROXY=socks5://172.17.0.1:1080`, then recreate the container and sign in again over VNC, so the new session starts from your home address.
+
+When the home computer is off the bot waits (state `no_proxy`, one Telegram alert) instead of using the server's address.
 
 Sign in to LinkedIn once in the window you see over VNC; the bot carries on by itself. Data (Chrome profile, state, logs, timings) stays in `deploy/data`.
 

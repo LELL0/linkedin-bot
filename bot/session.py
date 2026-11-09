@@ -9,10 +9,11 @@ import base64
 import json
 import logging
 import re
+import socket
 from collections import Counter
-import re
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, Request, async_playwright
 from playwright.async_api import Error as PlaywrightError
@@ -42,6 +43,29 @@ async ({method, url, headers, body}) => {
   return {status: response.status, text: await response.text()};
 }
 """
+
+
+def proxy_problem(proxy: str, timeout: float = 5.0) -> str:
+    """Why the proxy cannot be used now ("" when it answers). Only a TCP connect: the
+    tunnel to the owner's home is either up or not."""
+    parts = urlsplit(proxy)
+    if parts.scheme not in ("socks5", "http", "https") or not parts.hostname or not parts.port:
+        return f"BOT_PROXY must look like socks5://host:port, not {proxy!r}"
+    try:
+        with socket.create_connection((parts.hostname, parts.port), timeout=timeout):
+            return ""
+    except OSError as error:
+        return f"proxy {parts.hostname}:{parts.port} does not answer ({type(error).__name__})"
+
+
+def browser_args(proxy: str, chromium: bool) -> list[str]:
+    args = ["--disable-blink-features=AutomationControlled"]
+    if chromium:
+        args.append("--disable-dev-shm-usage")
+    if proxy:
+        # WebRTC sends UDP around a proxy, which would show the server's own address.
+        args.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+    return args
 
 
 @dataclass
@@ -74,6 +98,9 @@ class Session:
 
     async def start(self, url: str = HOME_URL) -> None:
         CONFIG.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._stopping = False
+        self.realtime_events = 0
+        self.realtime_topics.clear()
         self._playwright = await async_playwright().start()
         channel = None if CONFIG.browser_channel == "chromium" else CONFIG.browser_channel
         self.context = await self._playwright.chromium.launch_persistent_context(
@@ -85,8 +112,9 @@ class Session:
             # Playwright adds --enable-automation, which sets navigator.webdriver and shows
             # the "controlled by automated software" bar. A person's Chrome has neither.
             ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled"]
-            + (["--disable-dev-shm-usage"] if channel is None else []),
+            args=browser_args(CONFIG.proxy, chromium=channel is None),
+            # Chrome never falls back to a direct connection when a fixed proxy fails.
+            proxy={"server": CONFIG.proxy} if CONFIG.proxy else None,
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         self.page.on("request", self._learn_from_request)
@@ -106,6 +134,11 @@ class Session:
             await self.context.close()
         if self._playwright:
             await self._playwright.stop()
+        self.context = self.page = self._playwright = None
+
+    @property
+    def open(self) -> bool:
+        return self.page is not None
 
     async def _tap_realtime(self) -> None:
         """Wake the main loop on realtime events the page receives. Only topic names are kept."""
@@ -211,6 +244,8 @@ def accept_label(full_name: str) -> re.Pattern:
 
 async def login() -> None:
     """Open the dedicated profile and wait for the user to sign in by hand."""
+    if CONFIG.proxy and (problem := proxy_problem(CONFIG.proxy)):
+        raise SystemExit(f"Not opening LinkedIn: {problem}. Start the home tunnel first.")
     session = Session()
     await session.start(LOGIN_URL)
     print("Sign in to LinkedIn in the Chrome window. This waits up to 15 minutes.", flush=True)
