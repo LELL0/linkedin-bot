@@ -8,10 +8,12 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import socket
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -58,6 +60,32 @@ def proxy_problem(proxy: str, timeout: float = 5.0) -> str:
         return f"proxy {parts.hostname}:{parts.port} does not answer ({type(error).__name__})"
 
 
+PROFILE_LOCKS = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def clear_stale_lock(profile_dir) -> bool:
+    """Remove the profile lock left by a Chrome in a container that is gone.
+
+    Chrome marks the profile in use with a SingletonLock link to "<hostname>-<pid>" and
+    clears stale locks only for its own hostname. A recreated container has a new one, so
+    Chrome refused to start ("profile appears to be in use ... on another computer") and
+    the bot restarted in a loop (2026-11-10)."""
+    lock = Path(profile_dir) / "SingletonLock"
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        return False
+    if target.rpartition("-")[0] == socket.gethostname():
+        return False  # This machine's own Chrome: leave it to Chrome.
+    for name in PROFILE_LOCKS:
+        try:
+            (Path(profile_dir) / name).unlink()
+        except OSError:
+            pass
+    log.warning("Removed a Chrome profile lock left by %s", target)
+    return True
+
+
 def browser_args(proxy: str, chromium: bool) -> list[str]:
     args = ["--disable-blink-features=AutomationControlled"]
     if chromium:
@@ -98,6 +126,7 @@ class Session:
 
     async def start(self, url: str = HOME_URL) -> None:
         CONFIG.profile_dir.mkdir(parents=True, exist_ok=True)
+        clear_stale_lock(CONFIG.profile_dir)
         self._stopping = False
         self.realtime_events = 0
         self.realtime_topics.clear()

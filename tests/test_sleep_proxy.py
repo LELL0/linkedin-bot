@@ -139,3 +139,23 @@ def test_chrome_opens_again_in_the_morning(monkeypatch):
     bot.idle = idle
     run_browser_loop_once(monkeypatch, bot)
     assert bot.session.starts == 1 and bot.state == "running"
+
+
+def test_lock_from_a_gone_container_is_removed(tmp_path):
+    import os
+    os.symlink("oldcontainer-32", tmp_path / "SingletonLock")
+    os.symlink("x", tmp_path / "SingletonCookie")
+    assert session_module.clear_stale_lock(tmp_path)
+    assert not os.path.lexists(tmp_path / "SingletonLock")
+    assert not os.path.lexists(tmp_path / "SingletonCookie")
+
+
+def test_own_lock_is_left_alone(tmp_path):
+    import os
+    os.symlink(f"{socket.gethostname()}-32", tmp_path / "SingletonLock")
+    assert not session_module.clear_stale_lock(tmp_path)
+    assert os.path.lexists(tmp_path / "SingletonLock")
+
+
+def test_no_lock_is_fine(tmp_path):
+    assert not session_module.clear_stale_lock(tmp_path)
