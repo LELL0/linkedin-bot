@@ -38,7 +38,7 @@ is slow on purpose, and each limit can be changed in `.env`:
 | `POLL_S` | `300-900` | Inbox check every 5-15 minutes, random. Realtime events do not make it sooner. |
 | `MIN_CHECK_GAP_S` | `60` | Never two inbox checks closer than this. |
 | `REPLY_DELAY_S` | `25-150` | Wait before reading and answering, plus typing time for the reply's length. |
-| `MAX_REPLIES_PER_DAY` | `40` | Then the rest wait until tomorrow, with a Telegram alert. |
+| `MAX_REPLIES_PER_DAY` | `40` | Then the rest wait until tomorrow, with an Enc Chat alert. |
 | `INVITE_WINDOW` | `9-11` | Invitations are handled once a day, at a random time in this window: every pending one is accepted. |
 | `ACCEPT_GAP_S` | `20-90` | Pause between two accepts in that daily round. |
 | `MAX_ACCEPTS_PER_DAY` | `0` | 0 accepts them all; a number caps the daily round. |
@@ -47,7 +47,7 @@ is slow on purpose, and each limit can be changed in `.env`:
 | `WAKE_JITTER_S` | `0-2400` | Chrome is closed outside `ACTIVE_HOURS` (no LinkedIn tab connected all night) and opens again at a random time up to 40 minutes after they start. |
 
 Older conversations (started before the bot) are never answered on their own. Send
-`/catchup 3` on Telegram to answer every unanswered one-to-one message from the last 3 days
+`/catchup 3` in Enc Chat to answer every unanswered one-to-one message from the last 3 days
 (1-30), one conversation at a time, within the active hours and the daily reply limit. The bot
 first sends the list of names. A reply to a message older than 3 hours may say sorry for the
 late answer. `/catchup stop` cancels.
@@ -94,7 +94,7 @@ Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending o
 
 ## Run it on a server
 
-`deploy/` runs the bot in Docker with Chromium in a virtual screen, so it works on amd64 and arm64 servers with no desktop. Settings go in `deploy/.env` (`AI_API_KEY`, and `TG_BOT_TOKEN` plus `TG_CHAT_ID` for Telegram alerts).
+`deploy/` runs the bot in Docker with Chromium in a virtual screen, so it works on amd64 and arm64 servers with no desktop. Settings go in `deploy/.env` (`AI_API_KEY`, and `ENC_BOT_SECRET` for the Enc Chat bot `bot_linkedin`; `ENC_BOT_URL` defaults to `http://enc-bot-agent:8787`). The container joins the external docker network `enc-bots`, where the bot agent runs (stream mode: no port to open). The bot takes commands only from Enc Chat. While `TG_BOT_TOKEN` plus `TG_CHAT_ID` stay set, what the bot sends is mirrored to Telegram for a trial; remove them to end it. `ENC_OWNER` (a username or user id) names the one person the bot obeys; without it the first person who writes is remembered.
 
 ```bash
 cd deploy
@@ -113,15 +113,15 @@ A cloud server's address is the strongest bot signal LinkedIn sees: the account 
 2. At home: `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R 172.17.0.1:1080 your-server` (OpenSSH 7.6+ acts as the SOCKS proxy itself). Keep it running, e.g. as a systemd user service with `Restart=always`.
 3. In `deploy/.env`: `BOT_PROXY=socks5://172.17.0.1:1080`, then recreate the container and sign in again over VNC, so the new session starts from your home address.
 
-When the home computer is off the bot waits (state `no_proxy`, one Telegram alert) instead of using the server's address.
+When the home computer is off the bot waits (state `no_proxy`, one Enc Chat alert) instead of using the server's address.
 
 Sign in to LinkedIn once in the window you see over VNC; the bot carries on by itself. Data (Chrome profile, state, logs, timings) stays in `deploy/data`.
 
 Health:
 - `docker compose ps` shows `healthy` or `unhealthy`. The check (`python -m bot health`) fails when the bot is signed out, its loop stops, or no inbox check has succeeded for the longest poll wait (`POLL_S` max) plus 6 minutes.
 - A watchdog thread exits the process if the loop stalls, and the bot exits after 10 minutes without a successful check, so Docker's restart policy starts it fresh.
-- Sign-outs, stalls and failed sends go to Telegram, at most once an hour per problem.
-- `/verbose 0-5` sends the bot's log to Telegram while it runs: 0 off (only alerts), 1 warnings and errors (every 5 min), 2 also each accept and reply (2 min), 3 everything but the heartbeat (1 min), 4 also the heartbeat (30 s), 5 also debug lines and other libraries (30 s). Lines from httpx are never sent, because they hold the bot token. `/verbose` alone shows the level; it survives restarts.
+- Sign-outs, stalls and failed sends go to Enc Chat, at most once an hour per problem.
+- `/verbose 0-5` sends the bot's log to Enc Chat while it runs: 0 off (only alerts), 1 warnings and errors (every 5 min), 2 also each accept and reply (2 min), 3 everything but the heartbeat (1 min), 4 also the heartbeat (30 s), 5 also debug lines and other libraries (30 s). Lines from httpx are never sent, because they can hold a token. `/verbose` alone shows the level; it survives restarts.
 - `/settings` lists the settings below that can change while the bot runs, with their values. `/set name value` changes one (`/set poll 5-15`, `/set reply_delay 30-120`, `/set max_replies 30`, `/set dry_run on`, `/set scope all`), `/interval 5-15` is short for `/set poll`, and `/reset name` or `/reset all` goes back to the environment's value. Ranges are random between the two numbers, in the unit `/settings` shows (min, s or h). Changes are kept in the bot's database across restarts; a new poll interval also replaces the wait already going. Names: `poll`, `check_gap`, `reply_delay`, `active_hours`, `invite_window`, `accept_gap`, `catchup_gap`, `max_replies`, `max_accepts`, `backoff`, `max_backoff`, `dry_run`, `scope`.
 
 Run only one copy per LinkedIn account: two would both answer every message.

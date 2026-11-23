@@ -1,6 +1,7 @@
 # LinkedIn reply bot on a server. Settings go in .env next to this file (AI_API_KEY, and
-# TG_BOT_TOKEN plus TG_CHAT_ID for alerts). Data (Chrome profile with the LinkedIn login,
-# state, logs, timings) lives in ./data.
+# ENC_BOT_SECRET for the Enc Chat bot bot_linkedin; ENC_BOT_URL defaults to
+# http://enc-bot-agent:8787; until the trial ends TG_BOT_TOKEN plus TG_CHAT_ID for the Telegram
+# mirror). Data (Chrome profile with the LinkedIn login, state, logs, timings) lives in ./data.
 name: linkedin-bot
 
 services:
@@ -13,6 +14,7 @@ services:
     image: linkedin-bot:local
     restart: unless-stopped
     env_file: .env
+    networks: [default, enc-bots]  # enc-bots: where the bot agent (enc-bot-agent:8787) runs
     environment:
       TZ: ${TZ:-Asia/Riyadh}
     volumes:
@@ -30,3 +32,7 @@ services:
     shm_size: 512m
     mem_limit: 1536m
     cpus: ${LINKEDIN_BOT_CPUS:-0.5}
+
+networks:
+  enc-bots:
+    external: true
