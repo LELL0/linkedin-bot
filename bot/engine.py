@@ -18,7 +18,7 @@ from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
 from .session import Session, proxy_problem
 from .store import Store
-from .telegram import TelegramControl
+from .enc import EncControl
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +82,12 @@ class Engine:
         self.catchup_task: asyncio.Task | None = None  # Daily limits already announced today.
         self.asleep = False
         self.started = False  # The first wake is done and the bot knows who it is.
-        # Owner settings from Telegram, kept across restarts.
+        # Owner settings from Enc Chat, kept across restarts.
         self.paused = self.store.get_meta("paused") == "1"
         self.replies_feed = self.store.get_meta("replies_feed") == "1"
         verbose = self.store.get_meta("verbose", "0")
         self.verbose = int(verbose) if verbose.isdigit() else 0
-        self.telegram = TelegramControl(self)
+        self.enc = EncControl(self)
 
     async def run(self) -> None:
         self.heartbeat = time.time()
@@ -95,7 +95,7 @@ class Engine:
         self.session.on_closed = self.on_browser_closed
         await asyncio.gather(
             self.start_and_poll(), self.invite_loop(), self.maintenance_loop(),
-            self.browser_loop(), self.telegram.loop(),
+            self.browser_loop(), self.enc.loop(),
         )
 
     async def start_and_poll(self) -> None:
@@ -263,7 +263,7 @@ class Engine:
             await asyncio.sleep(300)
 
     async def sleep_until_next_poll(self) -> None:
-        """Wait a random time from CONFIG.poll_s. When the interval changes from Telegram, the
+        """Wait a random time from CONFIG.poll_s. When the interval changes from Enc Chat, the
         wait is drawn again from the new interval, counted from the last check."""
         deadline = time.time() + random.uniform(*CONFIG.poll_s)
         while (left := deadline - time.time()) > 0:
@@ -275,7 +275,7 @@ class Engine:
             deadline = self.last_check + random.uniform(*CONFIG.poll_s)
 
     def change_setting(self, name: str, value: object | None) -> None:
-        """Set (or with None, reset) a setting from Telegram and keep it across restarts."""
+        """Set (or with None, reset) a setting from Enc Chat and keep it across restarts."""
         if value is None:
             settings.reset(name, self.store)
         else:
@@ -604,7 +604,7 @@ class Engine:
                 log.info("Replied: %s", trace)
                 others = [p for p in thread.participants if p != self.scope.self_id]
                 sender = thread.names.get(others[0], "") if others else ""
-                await self.telegram.reply_sent(
+                await self.enc.reply_sent(
                     sender, [render_message(m) for m in pending], reply
                 )
                 return

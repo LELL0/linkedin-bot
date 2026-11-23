@@ -1,4 +1,4 @@
-"""Settings changed from Telegram. All data is synthetic."""
+"""Settings changed from Enc Chat. All data is synthetic."""
 
 import asyncio
 import time
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot import engine as engine_module
-from bot import settings, telegram
+from bot import enc, settings
 from bot.config import CONFIG
 
 
@@ -92,8 +92,8 @@ def test_broken_stored_value_falls_back_to_default():
 
 
 def control(monkeypatch):
-    monkeypatch.setenv("TG_BOT_TOKEN", "t")
-    monkeypatch.setenv("TG_CHAT_ID", "42")
+    monkeypatch.setenv("ENC_BOT_SECRET", "s")
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
     store = MemoryStore()
     changes = []
 
@@ -106,7 +106,7 @@ def control(monkeypatch):
 
     engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
                              accepted=0, replies_sent=0, change_setting=change_setting)
-    tg = telegram.TelegramControl(engine)
+    tg = enc.EncControl(engine)
     sent = []
 
     async def send(text):
@@ -116,7 +116,7 @@ def control(monkeypatch):
     return tg, store, changes, sent
 
 
-def test_telegram_set_interval_reset(monkeypatch):
+def test_enc_set_interval_reset(monkeypatch):
     tg, store, _changes, sent = control(monkeypatch)
     asyncio.run(tg.handle("/interval 2-4"))
     assert CONFIG.poll_s == (120.0, 240.0) and "2-4 min" in sent[-1]

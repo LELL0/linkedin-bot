@@ -1,4 +1,4 @@
-"""Liveness for servers: a status file the bot rewrites, a check for Docker, and Telegram alerts."""
+"""Liveness for servers: a status file the bot rewrites, a check for Docker, and Enc Chat alerts."""
 
 import json
 import logging
@@ -8,8 +8,7 @@ import subprocess
 import threading
 import time
 
-import httpx
-
+from . import enc, tg_mirror
 from .config import CONFIG
 
 log = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ STALE_STATUS_S = 180  # The bot rewrites the file every minute.
 
 def stale_poll_s() -> float:
     """No successful LinkedIn check for this long means it is stuck. The bot waits up to
-    CONFIG.poll_s between checks on purpose (changeable from Telegram), so allow the longest
+    CONFIG.poll_s between checks on purpose (changeable from Enc Chat), so allow the longest
     wait plus a check's time."""
     return CONFIG.poll_s[1] + CONFIG.min_check_gap_s + 300
 
@@ -66,22 +65,14 @@ _last_sent: dict[str, float] = {}
 
 
 def alert(text: str) -> None:
-    """Log, then tell a person by Telegram (servers) or a desktop notification (laptop)."""
+    """Log, then tell the owner on Enc Chat (servers) or by a desktop notification (laptop)."""
     log.error("ALERT: %s", text)
     now = time.time()
     if now - _last_sent.get(text, 0) < ALERT_REPEAT_S:
         return
     _last_sent[text] = now
-    token, chat = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
-    if token and chat:
-        try:
-            httpx.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": f"LinkedIn bot: {text}"},
-                timeout=10,
-            )
-        except httpx.HTTPError as error:
-            log.warning("Telegram alert failed: %s", type(error).__name__)
+    enc.notify(f"LinkedIn bot: {text}")
+    tg_mirror.send_sync(f"LinkedIn bot: {text}")  # TELEGRAM-MIRROR: delete at M9
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],
