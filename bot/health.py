@@ -71,7 +71,7 @@ def alert(text: str) -> None:
     if now - _last_sent.get(text, 0) < ALERT_REPEAT_S:
         return
     _last_sent[text] = now
-    enc.notify(f"LinkedIn bot: {text}")
+    enc.notify(enc.alert_text(text))
     tg_mirror.send_sync(f"LinkedIn bot: {text}")  # TELEGRAM-MIRROR: delete at M9
     if shutil.which("notify-send"):
         subprocess.run(

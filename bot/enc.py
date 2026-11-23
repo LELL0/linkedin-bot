@@ -7,7 +7,13 @@ POST /v1/messages (bot/enc_bot_client.py). The agent already admits only the own
 module checks the sender again and fails closed: ENC_OWNER is required (an Enc user id, or
 "@username"), and with it unset or malformed every command is ignored.
 
-Texts use Enc Chat marks: *bold*, _italic_, ~strike~, `code`, ```block```, "> " quote, "- " bullet.
+Texts are laid out in Enc Chat marks (bot/marks.py): a "## " heading, "- " bullets, numbered
+items, "> " quotes, ```blocks``` and *bold*. Enc Chat 1.7.14 draws them; older apps show the
+marks as typed, so each layout also reads as plain text. Text from outside (names, messages,
+errors) goes through marks.inline(), quote() or fence() first, so it cannot add a layout.
+
+TELEGRAM-MIRROR: delete at M9. The mirror keeps the texts it had before the Enc Chat layout:
+send() takes them as `telegram`, and the builders below make them with telegram=True.
 """
 
 import asyncio
@@ -22,6 +28,7 @@ from typing import TYPE_CHECKING
 from . import metrics, settings, tg_mirror
 from .config import CONFIG
 from .enc_bot_client import Bot, EncBotError
+from .marks import fence, inline, quote, start_safe
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -42,7 +49,10 @@ COMMANDS = [
     ("interval", "Random wait between inbox checks, in minutes: /interval 5-15"),
     ("help", "List the commands"),
 ]
-HELP = "*LinkedIn bot*\n" + "\n".join(f"- /{c} - {d}" for c, d in COMMANDS)
+HELP = "## LinkedIn bot\n" + "\n".join(f"- */{c}* {d}" for c, d in COMMANDS)
+# TELEGRAM-MIRROR: delete at M9
+HELP_TELEGRAM = "*LinkedIn bot*\n" + "\n".join(f"- /{c} - {d}" for c, d in COMMANDS)
+CATCHUP_NAMES = 20  # names listed when a catch-up starts; the rest are counted
 MAX_MESSAGE = 4000
 VERBOSE_LIMIT = 3500  # characters of log per message; older lines are left out
 # /verbose levels: what each adds, and seconds between the messages with the log.
@@ -84,17 +94,33 @@ def every_text(seconds: int) -> str:
     return f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"
 
 
-def fence(text: object) -> str:
-    """Text as a code block, so marks inside it (a message's own asterisks) stay as written."""
-    return "```\n" + str(text).replace("```", "'''").strip("\n") + "\n```"
-
-
-def verbose_help(current: int) -> str:
+def verbose_help(current: int, telegram: bool = False) -> str:
     rows = []
     for n, (text, every) in VERBOSE_LEVELS.items():
         row = f"/verbose {n} - {text}" + (f" (every {every_text(every)})" if every else "")
         rows.append(f"- *{row}*" if n == current else f"- {row}")
-    return f"Verbose level: *{current}*\n" + "\n".join(rows)
+    if telegram:  # TELEGRAM-MIRROR: delete at M9
+        return f"Verbose level: *{current}*\n" + "\n".join(rows)
+    return f"## Verbose level {current}\n" + "\n".join(rows)
+
+
+def alert_text(text: str) -> str:
+    """A health alert for Enc Chat: a heading, then the alert on one line. Alerts carry
+    error strings, so the line is made inert and cannot start a block."""
+    return "## Alert\n" + start_safe(inline(text, 1000))
+
+
+def catchup_text(names: list[str], days: float, gap: tuple[float, float]) -> str:
+    """The catch-up's plan: how many conversations, their names in answer order, the pace."""
+    shown = [f"{n}. {inline(name, 60) or '?'}" for n, name in enumerate(names[:CATCHUP_NAMES], 1)]
+    more = len(names) - len(shown)
+    return "\n".join([
+        f"## Catch-up: {len(names)} conversation(s)",
+        f"Unanswered messages from the last {days:g} days:",
+        *shown,
+        *([f"…and {more} more."] if more else []),
+        f"Answering one every {gap[0] / 60:.0f}-{gap[1] / 60:.0f} min. /catchup stop cancels.",
+    ])
 
 
 def verbose_message(lines: list[str], limit: int = VERBOSE_LIMIT) -> str:
@@ -205,7 +231,11 @@ class EncControl:
     def enabled(self) -> bool:
         return self.bot is not None
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, telegram: str | None = None) -> None:
+        """[text] to the owner on Enc Chat. The Telegram mirror gets [telegram] when given (the
+        text as it was before the Enc Chat layout), else the same text."""
+        # TELEGRAM-MIRROR: delete at M9
+        mirror = (text if telegram is None else telegram)[:MAX_MESSAGE]
         text = text[:MAX_MESSAGE]
         if self.bot is not None:
             try:
@@ -213,7 +243,7 @@ class EncControl:
             except EncBotError as error:
                 log.warning("Enc Chat send failed: %s", error.code)
         if tg_mirror.enabled():  # TELEGRAM-MIRROR: delete at M9
-            await asyncio.to_thread(tg_mirror.send_sync, text)  # TELEGRAM-MIRROR: delete at M9
+            await asyncio.to_thread(tg_mirror.send_sync, mirror)  # TELEGRAM-MIRROR: delete at M9
 
     async def register_commands(self) -> None:
         """Fill the app's "/" menu; try again until the agent answers."""
@@ -289,7 +319,7 @@ class EncControl:
         if not self.is_owner(event.get("from") or {}):
             return  # Only the owner; strangers get nothing.
         if kind == "started":
-            await self.send(HELP)
+            await self.send(HELP, telegram=HELP_TELEGRAM)
             return
         args = event.get("args") or ""
         if isinstance(args, (list, tuple)):
@@ -317,11 +347,13 @@ class EncControl:
     async def set_verbose(self, argument: str) -> None:
         current = self.verbose
         if not argument:
-            await self.send(verbose_help(current))
+            await self.send(verbose_help(current), telegram=verbose_help(current, telegram=True))
             return
         word = {"off": "0", "on": "3"}.get(argument, argument)
         if not (word.isdigit() and int(word) in VERBOSE_LEVELS):
-            await self.send("Use /verbose with a level from 0 to 5.\n" + verbose_help(current))
+            wrong = "Use /verbose with a level from 0 to 5.\n"
+            await self.send(wrong + verbose_help(current),
+                            telegram=wrong + verbose_help(current, telegram=True))
             return
         level = int(word)
         self.engine.set_verbose(level)
@@ -342,11 +374,12 @@ class EncControl:
         argument = words[1].lower() if len(words) > 1 else ""
         engine = self.engine
         if command in ("/start", "/help"):
-            await self.send(HELP)
+            await self.send(HELP, telegram=HELP_TELEGRAM)
         elif command == "/status":
-            await self.send(self.status_text())
+            await self.send(self.status_text(), telegram=self.status_text(telegram=True))
         elif command == "/stats":
-            await self.send(fence(metrics.report(metrics.load(CONFIG.metrics_path))))
+            report = fence(metrics.report(metrics.load(CONFIG.metrics_path)))
+            await self.send("## Stats\n" + report, telegram=report)
         elif command == "/pause":
             engine.set_paused(True)
             await self.send("Paused: no accepting or answering until /resume. Messages that arrive "
@@ -367,7 +400,7 @@ class EncControl:
         elif command == "/catchup":
             await self.catchup(argument)
         elif command == "/settings":
-            await self.send(self.settings_text())
+            await self.send(self.settings_text(), telegram=self.settings_text(telegram=True))
         elif command == "/set":
             await self.set_setting(words[1].lower() if len(words) > 1 else "",
                                    " ".join(words[2:]))
@@ -399,11 +432,20 @@ class EncControl:
         else:
             await self.send("A catch-up is already going. /catchup stop cancels it.")
 
-    def settings_text(self) -> str:
-        return ("*Settings* (a star marks one changed from the default)\n"
-                f"{fence(settings.listing())}\n"
-                "Change one: /set name value, e.g. /set poll 5-15 or /set dry_run on. "
-                "Ranges are random between the two numbers. /reset name or /reset all.")
+    def settings_text(self, telegram: bool = False) -> str:
+        how = ("Change one: /set name value, e.g. /set poll 5-15 or /set dry_run on. "
+               "Ranges are random between the two numbers. /reset name or /reset all.")
+        if telegram:  # TELEGRAM-MIRROR: delete at M9
+            return ("*Settings* (a star marks one changed from the default)\n"
+                    f"{fence(settings.listing())}\n" + how)
+        rows = []
+        for name, tunable in settings.TUNABLES.items():
+            default = settings.DEFAULTS[name]
+            changed = getattr(settings.CONFIG, tunable.field) != default
+            value = settings.show(name) + (f" (default {settings.show(name, default)})"
+                                           if changed else "")
+            rows.append(f"- *{name}* = {value}. {tunable.help}")
+        return "\n".join(["## Settings", *rows, "---", how])
 
     async def set_setting(self, name: str, value: str) -> None:
         name = name.replace("-", "_")
@@ -419,8 +461,8 @@ class EncControl:
         try:
             parsed = settings.parse(name, value)
             self.engine.change_setting(name, parsed)
-        except ValueError as error:
-            await self.send(f"Not changed: {error}.")
+        except ValueError as error:  # it may quote what the owner typed
+            await self.send(f"Not changed: {inline(error)}.", telegram=f"Not changed: {error}.")
             return
         note = ""
         if name == "scope" and parsed == "all":
@@ -448,22 +490,30 @@ class EncControl:
         else:
             await self.send(f"{name} = *{settings.show(name)}* (default).")
 
-    def status_text(self) -> str:
+    def status_text(self, telegram: bool = False) -> str:
         engine = self.engine
         now = time.time()
         state = "paused" if engine.paused else engine.state
-        return "\n".join([
-            f"State: *{state}*",
+        rows = [
             f"Last successful LinkedIn check: {ago(now - engine.last_ok)}",
             f"Since start: {engine.accepted} accepted, {engine.replies_sent} replies",
             f"Replies feed: {'on' if engine.replies_feed else 'off'}",
             f"Verbose: {self.verbose}",
             f"Inbox check every {settings.show('poll')}, active {settings.show('active_hours')}"
             + (", *dry run*" if CONFIG.dry_run else ""),
-        ])
+        ]
+        if telegram:  # TELEGRAM-MIRROR: delete at M9
+            return "\n".join([f"State: *{state}*", *rows])
+        return "\n".join([f"## Status: {inline(state)}", *(f"- {row}" for row in rows)])
 
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:
+        """Each answered conversation: what came in and the reply, as quotes. A message's own
+        marks stay inert (marks.quote)."""
         if not (self.enabled and self.engine.replies_feed):
             return
-        who = (sender or "Someone").replace("*", "")
-        await self.send(f"*{who}*:\n{fence(chr(10).join(incoming))}\n*You*:\n{fence(reply)}")
+        who = inline(sender, 60) or "Someone"
+        text = f"### {who} wrote\n{quote(chr(10).join(incoming))}\n### You replied\n{quote(reply)}"
+        # TELEGRAM-MIRROR: delete at M9 (the old layout)
+        old = (sender or "Someone").replace("*", "")
+        await self.send(text, telegram=f"*{old}*:\n{fence(chr(10).join(incoming))}\n*You*:\n"
+                                      f"{fence(reply)}")
