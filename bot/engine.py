@@ -15,10 +15,11 @@ from .config import CONFIG
 from .guard import Scope, in_scope, predates_start, unanswered
 from .health import alert, stale_poll_s, start_watchdog, write_status
 from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
+from .marks import inline
 from .models import Message, Thread
 from .session import Session, proxy_problem
 from .store import Store
-from .enc import EncControl
+from .enc import EncControl, catchup_text
 
 log = logging.getLogger(__name__)
 
@@ -343,14 +344,15 @@ class Engine:
             if not threads:
                 await report(f"Catch-up: no unanswered messages in the last {days:g} days.")
                 return
-            names = ", ".join(
-                next(iter(t.names.values()), "?") for t in threads
-            )
+            names = [next(iter(t.names.values()), "?") for t in threads]
             low, high = CONFIG.catchup_gap_s
             await report(
-                f"Catch-up: {len(threads)} conversation(s) with unanswered messages from the last "
-                f"{days:g} days: {names}. Answering one every {low / 60:.0f}-{high / 60:.0f} min. "
-                "/catchup stop cancels."
+                catchup_text(names, days, (low, high)),
+                telegram=(  # TELEGRAM-MIRROR: delete at M9 (the old layout)
+                    f"Catch-up: {len(threads)} conversation(s) with unanswered messages from the "
+                    f"last {days:g} days: {', '.join(names)}. Answering one every "
+                    f"{low / 60:.0f}-{high / 60:.0f} min. /catchup stop cancels."
+                ),
             )
             answered = 0
             for number, thread in enumerate(threads):
@@ -375,7 +377,8 @@ class Engine:
             raise
         except Exception as error:
             await self.on_error(error, "catch-up")
-            await report(f"Catch-up stopped: {error}")
+            await report(f"Catch-up stopped: {inline(error)}",
+                         telegram=f"Catch-up stopped: {error}")  # TELEGRAM-MIRROR: delete at M9
 
     def on_browser_closed(self, what: str) -> None:
         """Exit so the supervisor (Docker or run.sh) starts the bot with a fresh Chrome."""

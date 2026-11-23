@@ -59,8 +59,8 @@ def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
     health._last_sent.clear()
     health.alert("signed out")
     health.alert("signed out")
-    assert sent == ["LinkedIn bot: signed out"]
-    assert mirrored == ["LinkedIn bot: signed out"]
+    assert sent == ["## Alert\nsigned out"]
+    assert mirrored == ["LinkedIn bot: signed out"]  # Telegram keeps the old text
 
 
 def test_healthcheck_uses_the_limit_the_bot_wrote():
