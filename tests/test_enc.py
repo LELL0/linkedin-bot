@@ -123,9 +123,11 @@ def control(monkeypatch):
     engine.set_replies_feed = lambda on: setattr(engine, "replies_feed", on)
     ec = enc.EncControl(engine)
     sent = []
+    ec.mirrored = []  # what the Telegram mirror would get
 
-    async def send(text):
+    async def send(text, telegram=None):
         sent.append(text)
+        ec.mirrored.append(text if telegram is None else telegram)
 
     ec.send = send
     return ec, engine, sent
@@ -147,18 +149,31 @@ def test_pause_resume_and_replies_toggle(monkeypatch):
     asyncio.run(ec.handle("/replies"))
     assert engine.replies_feed is False
     asyncio.run(ec.handle("/status"))
-    assert "running" in sent[-1] and "1 accepted, 2 replies" in sent[-1]
-    assert "State: *running*" in sent[-1]  # Enc Chat marks, never HTML
+    assert sent[-1].startswith("## Status: running\n- ")  # Enc Chat marks, never HTML
+    assert "- Since start: 1 accepted, 2 replies" in sent[-1]
     assert "<b>" not in sent[-1]
+    assert ec.mirrored[-1].startswith("State: *running*\n")  # Telegram keeps the old text
 
 
-def test_reply_feed_keeps_marks_literal_and_only_when_on(monkeypatch):
+def test_reply_feed_quotes_with_marks_inert_and_only_when_on(monkeypatch):
     ec, engine, sent = control(monkeypatch)
     asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```"], "hey"))
     assert sent == []
     engine.replies_feed = True
-    asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```"], "hey"))
-    assert "```\n*hi* '''x'''\n```" in sent[0] and "hey" in sent[0] and "*Sam*" in sent[0]
+    asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```", "line one\n\n# not a heading"], "_ok_"))
+    assert sent[0] == ("### Sam wrote\n> \u2217hi\u2217 '''x'''\n> line one\n> # not a heading\n"
+                       "### You replied\n> \uff3fok\uff3f")
+    # Telegram keeps the old layout.
+    assert ec.mirrored[0].startswith("*Sam*:\n```\n*hi* '''x'''\nline one")
+
+
+def test_reply_feed_name_cannot_add_marks_or_lines(monkeypatch):
+    ec, engine, sent = control(monkeypatch)
+    engine.replies_feed = True
+    asyncio.run(ec.reply_sent("_Sam_\n## Boss", ["hi"], "hey"))
+    asyncio.run(ec.reply_sent("", ["hi"], "hey"))
+    assert sent[0].startswith("### \uff3fSam\uff3f ## Boss wrote\n> hi\n")
+    assert sent[1].startswith("### Someone wrote\n")
 
 
 def test_events_become_commands_for_the_owner_only(monkeypatch):
@@ -174,7 +189,8 @@ def test_events_become_commands_for_the_owner_only(monkeypatch):
     assert engine.replies_feed is True
     run({"type": "message", "id": "e4", "from": {"id": OWNER}, "text": "hello"})
     run({"type": "started", "id": "e5", "from": {"id": OWNER}})
-    assert sent[-1].startswith("*LinkedIn bot*")
+    assert sent[-1].startswith("## LinkedIn bot\n- */status* ")
+    assert ec.mirrored[-1].startswith("*LinkedIn bot*\n- /status - ")
 
 
 def test_events_repeat_is_dropped(monkeypatch):
@@ -288,7 +304,7 @@ def test_stream_commands_reach_the_engine_and_commands_are_registered(agent, mon
 
     asyncio.run(run())
     assert engine.paused is True
-    assert "Paused" in agent.sent[0]["text"] and "State: *paused*" in agent.sent[1]["text"]
+    assert "Paused" in agent.sent[0]["text"] and "## Status: paused" in agent.sent[1]["text"]
     assert len(agent.sent) == 2  # the stranger got nothing; the reconnect did not repeat anything
     assert agent.stream_calls >= 1
     names = [c["command"] for c in agent.commands]
@@ -331,7 +347,9 @@ def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
         asyncio.run(ec.handle(wrong))
         assert engine.verbose == 2 and "level from 0 to 5" in sent[-1]
     asyncio.run(ec.handle("/verbose"))
-    assert "Verbose level: *2*" in sent[-1]
+    assert sent[-1].startswith("## Verbose level 2\n")
+    assert "\n- */verbose 2 - level 1" in sent[-1] and "\n- /verbose 3 - " in sent[-1]
+    assert ec.mirrored[-1].startswith("Verbose level: *2*\n")
     asyncio.run(ec.handle("/verbose off"))
     assert engine.verbose == 0
     asyncio.run(ec.handle("/status"))
@@ -380,3 +398,64 @@ def test_commands_fit_the_agent_rules():
     import re
     for name, description in enc.COMMANDS:
         assert re.fullmatch(r"[a-z0-9_]{1,32}", name) and 1 <= len(description) <= 120
+
+
+def test_telegram_mirror_keeps_the_old_texts(agent, monkeypatch):
+    posts = []
+    monkeypatch.setattr(tg_mirror.httpx, "post", lambda url, **kw: posts.append(kw["json"]["text"]))
+    monkeypatch.setenv("TG_BOT_TOKEN", "t")
+    monkeypatch.setenv("TG_CHAT_ID", "42")
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+                             accepted=0, replies_sent=0, verbose=0)
+    engine.set_paused = lambda on: setattr(engine, "paused", on)
+    ec = enc.EncControl(engine)
+    for text in ("/help", "/status", "/settings", "/pause"):
+        asyncio.run(ec.handle(text))
+    enc_texts = [m["text"] for m in agent.sent]
+    assert enc_texts[0] == enc.HELP and posts[0] == enc.HELP_TELEGRAM
+    assert enc_texts[1].startswith("## Status: running") and posts[1].startswith("State: *running*")
+    assert enc_texts[2].startswith("## Settings\n- *poll* = ")
+    assert posts[2].startswith("*Settings* (a star marks one changed from the default)\n```")
+    assert enc_texts[3] == posts[3] and enc_texts[3].startswith("Paused")  # unchanged texts
+    enc.logging.getLogger().removeHandler(ec.verbose_log)
+
+
+def test_layouts_are_short_lines_and_lists(monkeypatch):
+    ec, engine, sent = control(monkeypatch)
+    lines = enc.HELP.split("\n")
+    assert lines[0] == "## LinkedIn bot" and len(lines) == len(enc.COMMANDS) + 1
+    assert all(line.startswith("- */") for line in lines[1:])
+    asyncio.run(ec.handle("/stats"))
+    assert sent[-1].startswith("## Stats\n```\n") and sent[-1].endswith("\n```")
+    assert ec.mirrored[-1].startswith("```\n")
+    asyncio.run(ec.handle("/verbose loud"))
+    assert sent[-1].startswith("Use /verbose with a level from 0 to 5.\n## Verbose level 0\n")
+
+
+def test_set_error_quoting_the_owner_stays_inert(monkeypatch):
+    ec, engine, sent = control(monkeypatch)
+    engine.change_setting = lambda name, value: None
+    asyncio.run(ec.handle("/set poll *x*"))
+    assert sent[-1] == "Not changed: '\u2217x\u2217' is not a number."
+    assert ec.mirrored[-1] == "Not changed: '*x*' is not a number."
+
+
+def test_alert_text_is_a_heading_and_one_safe_line():
+    assert enc.alert_text("Signed out or checkpoint.") == "## Alert\nSigned out or checkpoint."
+    text = enc.alert_text("- pushed back\n```\n_boom_ [x](https://e.com)")
+    assert text == "## Alert\n\u200b- pushed back ''' \uff3fboom\uff3f [x] (https://e.com)"
+
+
+def test_catchup_text_lists_names_safely_and_counts_the_rest():
+    text = enc.catchup_text(["Sam", "*Lynn*", "1. Ana\n# x", ""], 3, (600.0, 1800.0))
+    assert text.split("\n") == [
+        "## Catch-up: 4 conversation(s)",
+        "Unanswered messages from the last 3 days:",
+        "1. Sam",
+        "2. \u2217Lynn\u2217",
+        "3. 1. Ana # x",
+        "4. ?",
+        "Answering one every 10-30 min. /catchup stop cancels.",
+    ]
+    many = enc.catchup_text([f"P{n}" for n in range(25)], 1.5, (60.0, 60.0))
+    assert "20. P19" in many and "21." not in many and "…and 5 more." in many

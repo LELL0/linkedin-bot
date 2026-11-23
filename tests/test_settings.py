@@ -109,7 +109,7 @@ def control(monkeypatch):
     tg = enc.EncControl(engine)
     sent = []
 
-    async def send(text):
+    async def send(text, telegram=None):
         sent.append(text)
 
     tg.send = send
@@ -123,7 +123,9 @@ def test_enc_set_interval_reset(monkeypatch):
     asyncio.run(tg.handle("/set max_replies 30"))
     assert CONFIG.max_replies_per_day == 30 and store.meta["setting:max_replies"] == "30"
     asyncio.run(tg.handle("/settings"))
-    assert "* poll = 2-4 min (default 5-15 min)" in sent[-1]
+    assert "\n- *poll* = 2-4 min (default 5-15 min). Random wait" in sent[-1]
+    assert "\n- *max_replies* = 30 (default 40). Replies per day at most" in sent[-1]
+    assert "\n- *dry_run* = off. on: only log" in sent[-1]  # unchanged: no default shown
     asyncio.run(tg.handle("/set poll 15-5"))
     assert sent[-1].startswith("Not changed") and CONFIG.poll_s == (120.0, 240.0)
     asyncio.run(tg.handle("/set nope 1"))
