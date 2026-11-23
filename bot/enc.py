@@ -4,8 +4,8 @@ the bot's own log lines at a chosen /verbose level.
 The bot is an Enc Chat bot (bot_linkedin) reached through the local bot agent, in the agent's
 `stream` mode: commands arrive as events on GET /v1/events and answers go out as
 POST /v1/messages (bot/enc_bot_client.py). The agent already admits only the owner; this
-module checks the sender again (ENC_OWNER, else the first person who wrote, kept in state.db),
-so a stranger who somehow got through gets no reply at all.
+module checks the sender again and fails closed: ENC_OWNER is required (an Enc user id, or
+"@username"), and with it unset or malformed every command is ignored.
 
 Texts use Enc Chat marks: *bold*, _italic_, ~strike~, `code`, ```block```, "> " quote, "- " bullet.
 """
@@ -14,6 +14,7 @@ import asyncio
 import collections
 import logging
 import os
+import re
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -57,6 +58,8 @@ KEY_ACTIONS = ("Accepted invitation", "Replied", "Paused", "Resumed", "Running",
 # Never forwarded: their lines hold the Telegram URL with the bot token while the trial mirror
 # runs (TELEGRAM-MIRROR: delete at M9), and each message sent would log one more line to send.
 NEVER_FORWARDED = ("httpx", "httpcore")
+OWNER_ID = re.compile(r"[0-9A-Za-z]{26}")  # an Enc user id (ULID)
+OWNER_NAME = re.compile(r"@[A-Za-z0-9_]{1,30}")
 SEEN_EVENTS = 500  # event ids kept to drop a repeat: the agent delivers at least once
 
 
@@ -184,10 +187,13 @@ class EncControl:
     def __init__(self, engine: "Engine") -> None:
         self.engine = engine
         self.bot = client_from_env()
-        self.owner = os.environ.get("ENC_OWNER", "").strip().lstrip("@").lower()
+        self.owner = self.owner_from_env()
         self.seen: collections.deque[str] = collections.deque(maxlen=SEEN_EVENTS)
         self.verbose_log = VerboseHandler()
         if self.enabled:
+            if not self.owner:
+                log.warning("ENC_OWNER_MISSING: ENC_OWNER is unset or not an Enc user id or "
+                            "@username; every command is ignored")
             logging.getLogger().addHandler(self.verbose_log)
             apply_log_level(self.verbose)
 
@@ -248,24 +254,27 @@ class EncControl:
             except Exception:  # noqa: BLE001 - one bad command must not stop the loop
                 log.exception("Enc Chat command failed")
 
+    @staticmethod
+    def owner_from_env() -> tuple[str, str] | None:
+        """ENC_OWNER as (kind, value): ("id", the Enc user id) compared only to the sender's id,
+        or ("name", "@username" lowercased) compared only to the sender's username."""
+        value = os.environ.get("ENC_OWNER", "").strip()
+        if OWNER_ID.fullmatch(value):
+            return ("id", value)
+        if OWNER_NAME.fullmatch(value):
+            return ("name", value.lower())
+        return None
+
     def is_owner(self, sender: dict) -> bool:
-        """The program's own check, on top of the agent's: ENC_OWNER (a username or user id),
-        else the first person who wrote, remembered in state.db."""
-        sender_id = str(sender.get("id") or "")
-        username = str(sender.get("username") or "").lstrip("@").lower()
-        if not (sender_id or username):
+        """The program's own check, on top of the agent's. Fails closed: without a valid
+        ENC_OWNER nobody is the owner."""
+        if not self.owner:
             return False
-        if self.owner:
-            return self.owner in (username, sender_id.lower())
-        store = getattr(self.engine, "store", None)
-        if store is None or not sender_id:
-            return False
-        known = store.get_meta("enc_owner")
-        if not known:
-            store.set_meta("enc_owner", sender_id)
-            log.info("Owner remembered")
-            return True
-        return known == sender_id
+        kind, wanted = self.owner
+        if kind == "id":
+            return str(sender.get("id") or "") == wanted
+        username = str(sender.get("username") or "").strip()
+        return bool(username) and "@" + username.lstrip("@").lower() == wanted
 
     async def on_event(self, event: dict) -> None:
         """One agent event: a command, or /start. Repeats and strangers are dropped silently."""

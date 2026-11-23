@@ -12,6 +12,9 @@ import pytest
 from bot import enc, health, tg_mirror
 
 
+OWNER = "01HZX3K9M2Q4R5S6T7V8W9XYZA"  # a 26 character Enc user id
+
+
 class FakeAgent:
     """The slice of the bot agent's API the bot uses: messages, commands, and an event stream."""
 
@@ -102,7 +105,7 @@ def agent(monkeypatch):
     monkeypatch.setenv("ENC_BOT_URL", fake.url)
     monkeypatch.setenv("ENC_BOT_SECRET", fake.secret)
     monkeypatch.delenv("ENC_BOT_SECRET_FILE", raising=False)
-    monkeypatch.delenv("ENC_OWNER", raising=False)
+    monkeypatch.setenv("ENC_OWNER", OWNER)
     monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TG_CHAT_ID", raising=False)
     yield fake
@@ -112,7 +115,7 @@ def agent(monkeypatch):
 def control(monkeypatch):
     """A control whose send() records the text instead of reaching an agent."""
     monkeypatch.setenv("ENC_BOT_SECRET", "s")
-    monkeypatch.delenv("ENC_OWNER", raising=False)
+    monkeypatch.setenv("ENC_OWNER", OWNER)
     monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
     engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
                              accepted=1, replies_sent=2, store=MemoryStore())
@@ -128,7 +131,7 @@ def control(monkeypatch):
     return ec, engine, sent
 
 
-def command(number, name, args="", sender="u1", username="me"):
+def command(number, name, args="", sender=OWNER, username="me"):
     return {"type": "command", "id": f"e{number}", "chat": sender, "command": name,
             "args": args, "from": {"id": sender, "username": username, "name": "Me"}}
 
@@ -162,15 +165,15 @@ def test_events_become_commands_for_the_owner_only(monkeypatch):
     ec, engine, sent = control(monkeypatch)
     run = lambda event: asyncio.run(ec.on_event(event))  # noqa: E731
     run(command(1, "pause"))
-    assert engine.paused is True  # first sender is remembered as the owner
-    assert engine.store.meta["enc_owner"] == "u1"
+    assert engine.paused is True
+    assert not hasattr(engine.store, "enc_owner") and "enc_owner" not in engine.store.meta
     before = len(sent)
-    run(command(2, "resume", sender="u2", username="stranger"))
+    run(command(2, "resume", sender="01HZX3K9M2Q4R5S6T7V8W9XYZB", username="stranger"))
     assert engine.paused is True and len(sent) == before  # a stranger gets nothing, not a reply
     run(command(3, "replies", args="on"))
     assert engine.replies_feed is True
-    run({"type": "message", "id": "e4", "from": {"id": "u1"}, "text": "hello"})
-    run({"type": "started", "id": "e5", "from": {"id": "u1"}})
+    run({"type": "message", "id": "e4", "from": {"id": OWNER}, "text": "hello"})
+    run({"type": "started", "id": "e5", "from": {"id": OWNER}})
     assert sent[-1].startswith("*LinkedIn bot*")
 
 
@@ -183,14 +186,46 @@ def test_events_repeat_is_dropped(monkeypatch):
     assert toggles == [True]
 
 
-def test_enc_owner_env_wins_over_first_sender(monkeypatch):
+def test_owner_by_id_is_compared_to_the_sender_id_only(monkeypatch):
     ec, engine, sent = control(monkeypatch)
-    ec.owner = "boss"
-    asyncio.run(ec.on_event(command(1, "pause", sender="u9", username="Someone")))
+    # The owner's id as a username, or someone else's id: refused.
+    asyncio.run(ec.on_event(command(1, "pause", sender="01HZX3K9M2Q4R5S6T7V8W9XYZB",
+                                    username=OWNER)))
     assert engine.paused is False
-    asyncio.run(ec.on_event(command(2, "pause", sender="u9", username="@Boss")))
+    asyncio.run(ec.on_event(command(2, "pause")))
     assert engine.paused is True
-    assert "enc_owner" not in engine.store.meta
+
+
+def test_owner_by_username_is_compared_to_the_sender_username_only(monkeypatch):
+    monkeypatch.setenv("ENC_OWNER", "@Boss")
+    ec, engine, sent = control(monkeypatch)
+    monkeypatch.setenv("ENC_OWNER", "@Boss")
+    ec = enc.EncControl(engine)
+    ec.send = lambda text: asyncio.sleep(0)
+    asyncio.run(ec.on_event(command(1, "pause", sender="boss", username="someone")))
+    asyncio.run(ec.on_event(command(2, "pause", sender="u9", username="boss2")))
+    assert engine.paused is False
+    asyncio.run(ec.on_event(command(3, "pause", sender="u9", username="BOSS")))
+    assert engine.paused is True
+
+
+@pytest.mark.parametrize("value", [None, "", "boss", "me", "01HZX3K9M2Q4R5S6T7V8W9XYZ", "@",
+                                   "01HZX3K9M2Q4R5S6T7V8W9XYZAB"])
+def test_owner_unset_or_malformed_ignores_every_command(monkeypatch, caplog, value):
+    ec, engine, sent = control(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("ENC_OWNER")
+    else:
+        monkeypatch.setenv("ENC_OWNER", value)
+    with caplog.at_level("WARNING"):
+        ec = enc.EncControl(engine)
+    assert sum("ENC_OWNER_MISSING" in r.getMessage() for r in caplog.records) == 1
+    ec.send = lambda text: sent.append(text) or asyncio.sleep(0)
+    for number, who in enumerate((OWNER, "me", "boss")):
+        asyncio.run(ec.on_event(command(number, "pause", sender=who, username=who)))
+    asyncio.run(ec.on_event({"type": "started", "id": "s", "from": {"id": OWNER}}))
+    assert engine.paused is False and sent == []
+    enc.logging.getLogger().removeHandler(ec.verbose_log)
 
 
 def test_enc_is_off_without_a_secret(monkeypatch):

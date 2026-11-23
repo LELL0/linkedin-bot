@@ -94,7 +94,7 @@ Optional settings in `.env`: `DRY_RUN=1` logs what it would do without sending o
 
 ## Run it on a server
 
-`deploy/` runs the bot in Docker with Chromium in a virtual screen, so it works on amd64 and arm64 servers with no desktop. Settings go in `deploy/.env` (`AI_API_KEY`, and `ENC_BOT_SECRET` for the Enc Chat bot `bot_linkedin`; `ENC_BOT_URL` defaults to `http://enc-bot-agent:8787`). The container joins the external docker network `enc-bots`, where the bot agent runs (stream mode: no port to open). The bot takes commands only from Enc Chat. While `TG_BOT_TOKEN` plus `TG_CHAT_ID` stay set, what the bot sends is mirrored to Telegram for a trial; remove them to end it. `ENC_OWNER` (a username or user id) names the one person the bot obeys; without it the first person who writes is remembered.
+`deploy/` runs the bot in Docker with Chromium in a virtual screen, so it works on amd64 and arm64 servers with no desktop. Settings go in `deploy/.env` (`AI_API_KEY`, and `ENC_BOT_SECRET` for the Enc Chat bot `bot_linkedin`; `ENC_BOT_URL` defaults to `http://enc-bot-agent:8787`). The container joins the external docker network `enc-bots`, where the bot agent runs (stream mode: no port to open). The bot takes commands only from Enc Chat. While `TG_BOT_TOKEN` plus `TG_CHAT_ID` stay set, what the bot sends is mirrored to Telegram for a trial; remove them to end it. `ENC_OWNER` is required: your Enc user id (26 characters) or `@username`. Without it, or if it is malformed, the bot ignores every command and logs `ENC_OWNER_MISSING` once at start.
 
 ```bash
 cd deploy
