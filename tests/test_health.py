@@ -52,15 +52,15 @@ def test_check_reads_the_status_file(tmp_path, monkeypatch):
 
 
 def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
-    sent = []
-    monkeypatch.setenv("TG_BOT_TOKEN", "t")
-    monkeypatch.setenv("TG_CHAT_ID", "c")
-    monkeypatch.setattr(health.httpx, "post", lambda *a, **k: sent.append(k["json"]["text"]))
+    sent, mirrored = [], []
+    monkeypatch.setattr(health.enc, "notify", sent.append)
+    monkeypatch.setattr(health.tg_mirror, "send_sync", mirrored.append)
     monkeypatch.setattr(health.shutil, "which", lambda name: None)
     health._last_sent.clear()
     health.alert("signed out")
     health.alert("signed out")
     assert sent == ["LinkedIn bot: signed out"]
+    assert mirrored == ["LinkedIn bot: signed out"]
 
 
 def test_healthcheck_uses_the_limit_the_bot_wrote():

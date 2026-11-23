@@ -114,7 +114,7 @@ def sim(tmp_path, monkeypatch):
         bot.capped, bot.asleep = set(), False
         bot.catchup_since, bot.catchup_task = {}, None
         bot.paused = bot.replies_feed = False
-        bot.telegram = SimpleNamespace(reply_sent=_no_feed)
+        bot.enc = SimpleNamespace(reply_sent=_no_feed)
         return bot
 
     return build
@@ -350,7 +350,7 @@ def test_reply_feed_gets_the_message_and_reply(sim):
     async def feed(sender, incoming, reply):
         seen.append((sender, incoming, reply))
 
-    bot.telegram = SimpleNamespace(reply_sent=feed)
+    bot.enc = SimpleNamespace(reply_sent=feed)
     bot.api.add("t", text="hello there")
     asyncio.run(settle(bot))
     assert seen == [("Sam", ["hello there"], "sure")]

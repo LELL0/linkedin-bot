@@ -1,4 +1,4 @@
-"""Settings the owner can change from Telegram while the bot runs.
+"""Settings the owner can change from Enc Chat while the bot runs.
 
 A change updates CONFIG in place, so every module sees it at once, and is kept in the
 store so it survives a restart. /reset goes back to the value from the environment.
