@@ -95,7 +95,7 @@ def sim(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
-    monkeypatch.setattr(engine_module, "alert", lambda text: None)
+    monkeypatch.setattr(engine_module, "alert", lambda *args, **kwargs: None)
     monkeypatch.setattr(engine_module, "write_status", lambda *a, **k: None)
 
     def build(api=None, mode="new_threads", store=None):

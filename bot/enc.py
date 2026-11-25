@@ -7,13 +7,15 @@ POST /v1/messages (bot/enc_bot_client.py). The agent already admits only the own
 module checks the sender again and fails closed: ENC_OWNER is required (an Enc user id, or
 "@username"), and with it unset or malformed every command is ignored.
 
-Texts are laid out in Enc Chat marks (bot/marks.py): a "## " heading, "- " bullets, numbered
-items, "> " quotes, ```blocks``` and *bold*. Enc Chat 1.7.14 draws them; older apps show the
-marks as typed, so each layout also reads as plain text. Text from outside (names, messages,
-errors) goes through marks.inline(), quote() or fence() first, so it cannot add a layout.
-
-TELEGRAM-MIRROR: delete at M9. The mirror keeps the texts it had before the Enc Chat layout:
-send() takes them as `telegram`, and the builders below make them with telegram=True.
+Every message is written the way a person texts, because a chat bubble on a phone is about
+35 characters wide (Enc Chat's "Keep bot messages small"): the first line is an emoji, a
+*bold* title and the fact that matters; each part after it is one line that starts with its
+name in bold, its facts side by side joined by " · ". No headings, blank lines or dividers;
+a "- " list only for items that stand alone (log lines), a "> " quote for what someone
+wrote, and at most one code box, for a real table. Enc Chat 1.7.14 draws the marks; older
+apps show them as typed, so each message also reads as plain text. Text from outside
+(names, messages, errors) goes through marks.inline() first, so it stays on one line and
+cannot add a mark of its own. The bot sends nothing to Telegram.
 """
 
 import asyncio
@@ -21,20 +23,24 @@ import collections
 import logging
 import os
 import re
+import statistics
 import threading
 import time
+import traceback
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from . import metrics, settings, tg_mirror
+from . import metrics, settings
 from .config import CONFIG
 from .enc_bot_client import Bot, EncBotError
-from .marks import fence, inline, quote, start_safe
+from .marks import fence, inline
 
 if TYPE_CHECKING:
     from .engine import Engine
 
 log = logging.getLogger(__name__)
 
+DOT = " · "
 COMMANDS = [
     ("status", "Running, signed in, last check"),
     ("stats", "Accepts and replies, and how fast"),
@@ -49,24 +55,50 @@ COMMANDS = [
     ("interval", "Random wait between inbox checks, in minutes: /interval 5-15"),
     ("help", "List the commands"),
 ]
-HELP = "## LinkedIn bot\n" + "\n".join(f"- */{c}* {d}" for c, d in COMMANDS)
-# TELEGRAM-MIRROR: delete at M9
-HELP_TELEGRAM = "*LinkedIn bot*\n" + "\n".join(f"- /{c} - {d}" for c, d in COMMANDS)
+# The "/" menu (COMMANDS) says what each command does; /help only groups them.
+HELP = "\n".join([
+    "🤖 *LinkedIn bot* · commands",
+    "*Watch* /status · /stats · /replies on or off · /verbose 0-5",
+    "*Control* /pause · /resume · /catchup 3 · /catchup stop",
+    "*Settings* /settings · /set poll 5-15 · /reset all · /interval 5-15",
+    "_The / menu says what each one does._",
+])
 CATCHUP_NAMES = 20  # names listed when a catch-up starts; the rest are counted
 MAX_MESSAGE = 4000
 VERBOSE_LIMIT = 3500  # characters of log per message; older lines are left out
-# /verbose levels: what each adds, and seconds between the messages with the log.
+VERBOSE_LINE = 200  # characters of one log line
+STATS_LATEST = 5  # rows in the /stats table of the latest accepts and replies
+TABLE_WIDTH = 31  # a code box line, so it fits a phone's chat bubble
+# /verbose levels: what each sends, the short name in the list of levels, and seconds
+# between the messages with the log.
 VERBOSE_LEVELS = {
-    0: ("off: only alerts", 0),
-    1: ("warnings and errors", 300),
-    2: ("level 1, plus each invitation accepted and reply sent", 120),
-    3: ("everything the bot logs, except the heartbeat", 60),
-    4: ("level 3, plus the heartbeat each minute", 30),
-    5: ("everything, also debug details and other libraries' messages", 30),
+    0: ("off, only alerts", "off", 0),
+    1: ("warnings and errors", "warnings", 300),
+    2: ("warnings, accepts and replies", "+ accepts, replies", 120),
+    3: ("everything but the heartbeat", "all but heartbeat", 60),
+    4: ("everything with the heartbeat", "+ heartbeat", 30),
+    5: ("everything, debug and libraries too", "+ debug", 30),
 }
+# How /status and alerts name the engine's state.
+STATES = {
+    "running": ("🟢", "Running"),
+    "paused": ("⏸️", "Paused"),
+    "needs_login": ("🔴", "Signed out"),
+    "no_proxy": ("🟠", "No home tunnel"),
+    "asleep": ("😴", "Asleep"),
+    "starting": ("⏳", "Starting"),
+}
+# /settings groups; a setting in no group is listed under Other.
+SETTING_GROUPS = {
+    "Timing": ("poll", "check_gap", "reply_delay", "accept_gap", "catchup_gap"),
+    "Hours": ("active_hours", "invite_window"),
+    "Limits": ("max_replies", "max_accepts", "backoff", "max_backoff"),
+    "Mode": ("dry_run", "scope"),
+}
+LOG_ICONS = {logging.WARNING: "⚠️ ", logging.ERROR: "🔴 ", logging.CRITICAL: "🔴 "}
 KEY_ACTIONS = ("Accepted invitation", "Replied", "Paused", "Resumed", "Running", "DRY RUN")
-# Never forwarded: their lines hold the Telegram URL with the bot token while the trial mirror
-# runs (TELEGRAM-MIRROR: delete at M9), and each message sent would log one more line to send.
+# Never forwarded: the HTTP client logs a line per request (each AI call), noise the owner
+# does not need, and a request's address is no business of the chat.
 NEVER_FORWARDED = ("httpx", "httpcore")
 OWNER_ID = re.compile(r"[0-9A-Za-z]{26}")  # an Enc user id (ULID)
 OWNER_NAME = re.compile(r"@[A-Za-z0-9_]{1,30}")
@@ -94,48 +126,68 @@ def every_text(seconds: int) -> str:
     return f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"
 
 
-def verbose_help(current: int, telegram: bool = False) -> str:
-    rows = []
-    for n, (text, every) in VERBOSE_LEVELS.items():
-        row = f"/verbose {n} - {text}" + (f" (every {every_text(every)})" if every else "")
-        rows.append(f"- *{row}*" if n == current else f"- {row}")
-    if telegram:  # TELEGRAM-MIRROR: delete at M9
-        return f"Verbose level: *{current}*\n" + "\n".join(rows)
-    return f"## Verbose level {current}\n" + "\n".join(rows)
+def plural(count: int, word: str, words: str = "") -> str:
+    return f"{count} {word if count == 1 else words or word + 's'}"
 
 
-def alert_text(text: str) -> str:
-    """A health alert for Enc Chat: a heading, then the alert on one line. Alerts carry
-    error strings, so the line is made inert and cannot start a block."""
-    return "## Alert\n" + start_safe(inline(text, 1000))
+def levels_line() -> str:
+    return "*Levels* " + DOT.join(f"{n} {short}" for n, (_, short, _) in VERBOSE_LEVELS.items())
+
+
+def verbose_help(current: int) -> str:
+    text, _, every = VERBOSE_LEVELS[current]
+    title = f"📜 *Verbose {current}* · {text}" + (f" · log every {every_text(every)}" if every else "")
+    return "\n".join([title, levels_line(), "_/verbose 0-5 changes it._"])
+
+
+def alert_text(title: str, detail: str = "", icon: str = "⚠️") -> str:
+    """A health alert on one line: an emoji, the problem in bold, then what it means. Alerts
+    can carry error strings, so both parts are made inert and kept on the line."""
+    line = f"{icon} *{inline(title, 100) or 'Alert'}*"
+    return line + (f" · {inline(detail, 1000)}" if detail.strip() else "")
 
 
 def catchup_text(names: list[str], days: float, gap: tuple[float, float]) -> str:
     """The catch-up's plan: how many conversations, their names in answer order, the pace."""
-    shown = [f"{n}. {inline(name, 60) or '?'}" for n, name in enumerate(names[:CATCHUP_NAMES], 1)]
+    shown = [inline(name, 40) or "?" for name in names[:CATCHUP_NAMES]]
     more = len(names) - len(shown)
     return "\n".join([
-        f"## Catch-up: {len(names)} conversation(s)",
-        f"Unanswered messages from the last {days:g} days:",
-        *shown,
-        *([f"…and {more} more."] if more else []),
-        f"Answering one every {gap[0] / 60:.0f}-{gap[1] / 60:.0f} min. /catchup stop cancels.",
+        f"🔁 *Catch-up · {plural(len(names), 'conversation')}* · last {days:g} days",
+        "*In order* " + DOT.join(shown) + (f" · and {more} more" if more else ""),
+        f"*Pace* one every {gap[0] / 60:.0f}-{gap[1] / 60:.0f} min · /catchup stop cancels",
     ])
 
 
 def verbose_message(lines: list[str], limit: int = VERBOSE_LIMIT) -> str:
-    """Log lines for one message: the newest that fit, each cut to a sane length."""
+    """Log lines for one message: a title, then the newest lines that fit as a list, each
+    on one line, cut to a sane length and made inert."""
     kept: list[str] = []
     size = 0
     for line in reversed(lines):
-        line = line[:300]
-        size += len(line) + 1
+        line = inline(line, VERBOSE_LINE)
+        size += len(line) + 3
         if size > limit:
             break
         kept.append(line)
     left_out = len(lines) - len(kept)
-    head = f"({left_out} earlier line(s) left out)\n" if left_out else ""
-    return head + fence("\n".join(reversed(kept)))
+    title = f"📜 *Log* · {plural(len(kept), 'line')}"
+    if left_out:
+        title += f" · {left_out} earlier left out"
+    return "\n".join([title, *(f"- {line}" for line in reversed(kept))])
+
+
+class ChatLogFormatter(logging.Formatter):
+    """A log record as one short line: time, an emoji for a warning or an error, the module,
+    the message, and for an exception only its last line (no traceback)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        name = record.name.removeprefix("bot.")
+        icon = LOG_ICONS.get(record.levelno, "")
+        text = f"{self.formatTime(record, '%H:%M:%S')} {icon}{name}: {record.getMessage()}"
+        if record.exc_info and record.exc_info[1] is not None:
+            last = traceback.format_exception_only(record.exc_info[1])[-1].strip()
+            text += f" ({last})"
+        return text
 
 
 class VerboseHandler(logging.Handler):
@@ -143,8 +195,7 @@ class VerboseHandler(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)
-        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
-                                            "%H:%M:%S"))
+        self.setFormatter(ChatLogFormatter())
         self.lines: collections.deque[tuple[int, str]] = collections.deque(maxlen=500)
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -174,7 +225,93 @@ def apply_log_level(level: int) -> None:
 
 def ago(seconds: float) -> str:
     seconds = int(seconds)
-    return f"{seconds}s ago" if seconds < 120 else f"{seconds // 60} min ago"
+    if seconds < 120:
+        return f"{seconds}s ago"
+    if seconds < 7200:
+        return f"{seconds // 60} min ago"
+    if seconds < 172800:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} days ago"
+
+
+def span(seconds: float, short: bool = False) -> str:
+    """A duration the way a person says it: 4.2s, 41s, 3.1 min, 2.5 h (short: 3.1m)."""
+    minute, hour = ("m", "h") if short else (" min", " h")
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}{minute}"
+    return f"{seconds / 3600:.1f}{hour}"
+
+
+def timing(entries: list[dict], field: str) -> str | None:
+    """The median and 95th percentile of a timing field, or None without data."""
+    values = [e[field] for e in entries if isinstance(e.get(field), (int, float))]
+    if not values:
+        return None
+    return f"{span(statistics.median(values))} median, {span(metrics.percentile(values, 0.95))} p95"
+
+
+def median(entries: list[dict], field: str) -> str | None:
+    values = [e[field] for e in entries if isinstance(e.get(field), (int, float))]
+    return span(statistics.median(values)) if values else None
+
+
+def tally(entries: list[dict], field: str) -> str:
+    """How often each value of a field came up, most first: "rest 10, page 2"."""
+    found = collections.Counter(str(e.get(field, "unknown")) for e in entries)
+    return ", ".join(f"{inline(name, 40)} {count}" for name, count in found.most_common(4))
+
+
+def part(name: str, facts: list[str | None]) -> str | None:
+    """One line of a message: its name in bold, then the facts that have data."""
+    facts = [fact for fact in facts if fact]
+    return f"*{name}* " + DOT.join(facts) if facts else None
+
+
+def latest_table(entries: list[dict]) -> str:
+    """The latest accepts and replies as a code box: when, which, how long, how it went."""
+    rows = []
+    for entry in sorted(entries, key=lambda e: e["at"])[-STATS_LATEST:]:
+        when = datetime.fromtimestamp(entry["at"]).strftime("%d/%m %H:%M")
+        detail = str(entry.get("via") or entry.get("outcome") or "")
+        detail = detail.removeprefix("draft_").replace("rejected_", "rej_").replace("question_", "q_")
+        row = f"{when} {entry['kind'][:6]:<6} {span(entry.get('total_s') or 0, short=True):>5} {detail}"
+        rows.append(row[:TABLE_WIDTH].rstrip())
+    return fence("\n".join(rows))
+
+
+def stats_text(entries: list[dict]) -> str:
+    """/stats: counts in the title, one line per part, the latest few in one small table."""
+    accepts = [e for e in entries if e.get("kind") == "accept"]
+    replies = [e for e in entries if e.get("kind") == "reply"]
+    if not (accepts or replies):
+        return "📊 *Stats* · no accepts or replies yet"
+    answered = sum(e.get("messages", 1) for e in replies)
+    lines = [(f"📊 *Stats* · {plural(len(accepts), 'accept')} · "
+              f"{plural(len(replies), 'reply', 'replies')} to {plural(answered, 'message')}")]
+    if accepts:
+        lines += [
+            part("Accepts", [f"invite to accept {t}" if (t := timing(accepts, "total_s")) else None,
+                             f"noticed {m}" if (m := median(accepts, "detect_s")) else None,
+                             f"call {m}" if (m := median(accepts, "action_s")) else None]),
+            part("Accepts via", [tally(accepts, "via"), f"seen by {tally(accepts, 'trigger')}"]),
+        ]
+    if replies:
+        steps = [("noticed", "detect_s"), ("quiet", "quiet_s"), ("draft", "draft_s"),
+                 ("check", "check_s"), ("send", "send_s")]
+        lines += [
+            part("Replies", [f"first message to reply {t}"
+                             if (t := timing(replies, "total_s")) else None,
+                             f"last to reply {m}" if (m := median(replies, "since_last_s")) else None]),
+            part("Reply steps", [f"{name} {m}" for name, field in steps
+                                 if (m := median(replies, field))]),
+            part("Outcomes", [tally(replies, "outcome"), f"models {tally(replies, 'model')}"]),
+        ]
+    lines.append(latest_table(accepts + replies))
+    return "\n".join(line for line in lines if line)
 
 
 def client_from_env() -> Bot | None:
@@ -231,19 +368,14 @@ class EncControl:
     def enabled(self) -> bool:
         return self.bot is not None
 
-    async def send(self, text: str, telegram: str | None = None) -> None:
-        """[text] to the owner on Enc Chat. The Telegram mirror gets [telegram] when given (the
-        text as it was before the Enc Chat layout), else the same text."""
-        # TELEGRAM-MIRROR: delete at M9
-        mirror = (text if telegram is None else telegram)[:MAX_MESSAGE]
+    async def send(self, text: str) -> None:
+        """[text] to the owner on Enc Chat. A refusal is logged, never raised."""
         text = text[:MAX_MESSAGE]
         if self.bot is not None:
             try:
                 await asyncio.to_thread(self.bot.send, text)
             except EncBotError as error:
                 log.warning("Enc Chat send failed: %s", error.code)
-        if tg_mirror.enabled():  # TELEGRAM-MIRROR: delete at M9
-            await asyncio.to_thread(tg_mirror.send_sync, mirror)  # TELEGRAM-MIRROR: delete at M9
 
     async def register_commands(self) -> None:
         """Fill the app's "/" menu; try again until the agent answers."""
@@ -319,7 +451,7 @@ class EncControl:
         if not self.is_owner(event.get("from") or {}):
             return  # Only the owner; strangers get nothing.
         if kind == "started":
-            await self.send(HELP, telegram=HELP_TELEGRAM)
+            await self.send(HELP)
             return
         args = event.get("args") or ""
         if isinstance(args, (list, tuple)):
@@ -330,8 +462,8 @@ class EncControl:
         """Send the log lines the /verbose level shows, as often as the level says."""
         last_sent = time.monotonic()
         while True:
-            await asyncio.sleep(VERBOSE_LEVELS[4][1])
-            every = VERBOSE_LEVELS[self.verbose][1]
+            await asyncio.sleep(VERBOSE_LEVELS[4][2])
+            every = VERBOSE_LEVELS[self.verbose][2]
             if time.monotonic() - last_sent >= every - 1:
                 await self.send_verbose()
                 last_sent = time.monotonic()
@@ -339,32 +471,28 @@ class EncControl:
     async def send_verbose(self) -> None:
         lines = self.verbose_log.take(self.verbose)
         if lines:
-            text = verbose_message(lines)
-            # TELEGRAM-MIRROR: delete at M9 (the token is only ever Telegram's)
-            token = os.environ.get("TG_BOT_TOKEN", "")
-            await self.send(text.replace(token, "***") if token else text)
+            await self.send(verbose_message(lines))
 
     async def set_verbose(self, argument: str) -> None:
         current = self.verbose
         if not argument:
-            await self.send(verbose_help(current), telegram=verbose_help(current, telegram=True))
+            await self.send(verbose_help(current))
             return
         word = {"off": "0", "on": "3"}.get(argument, argument)
         if not (word.isdigit() and int(word) in VERBOSE_LEVELS):
-            wrong = "Use /verbose with a level from 0 to 5.\n"
-            await self.send(wrong + verbose_help(current),
-                            telegram=wrong + verbose_help(current, telegram=True))
+            await self.send(f"❔ *Verbose {current}* stays · use a level from 0 to 5\n"
+                            + levels_line())
             return
         level = int(word)
         self.engine.set_verbose(level)
         apply_log_level(level)
         self.verbose_log.take(0)  # start from new lines only
-        text, every = VERBOSE_LEVELS[level]
+        text, _, every = VERBOSE_LEVELS[level]
         if not level:
-            await self.send(f"Verbose 0, {text}.")
+            await self.send(f"📜 *Verbose 0* · {text}")
             return
-        await self.send(f"Verbose {level}: {text}. The log comes every {every_text(every)}. "
-                        "/verbose 0 turns it off.")
+        await self.send(f"📜 *Verbose {level}* · {text} · log every {every_text(every)} · "
+                        "/verbose 0 stops it")
 
     async def handle(self, text: str) -> None:
         if not text.startswith("/"):
@@ -374,33 +502,33 @@ class EncControl:
         argument = words[1].lower() if len(words) > 1 else ""
         engine = self.engine
         if command in ("/start", "/help"):
-            await self.send(HELP, telegram=HELP_TELEGRAM)
+            await self.send(HELP)
         elif command == "/status":
-            await self.send(self.status_text(), telegram=self.status_text(telegram=True))
+            await self.send(self.status_text())
         elif command == "/stats":
-            report = fence(metrics.report(metrics.load(CONFIG.metrics_path)))
-            await self.send("## Stats\n" + report, telegram=report)
+            await self.send(stats_text(metrics.load(CONFIG.metrics_path)))
         elif command == "/pause":
             engine.set_paused(True)
-            await self.send("Paused: no accepting or answering until /resume. Messages that arrive "
-                            "meanwhile are answered after /resume unless you reply yourself.")
+            await self.send("⏸️ *Paused* · no accepts or replies until /resume · messages that "
+                            "come meanwhile get answered then, unless you reply first")
         elif command == "/resume":
             engine.set_paused(False)
-            await self.send("Resumed: accepting and answering again.")
+            await self.send("▶️ *Resumed* · accepting and answering again")
         elif command == "/replies":
             if argument not in ("", "on", "off"):
-                await self.send("Use /replies on, /replies off, or /replies alone to switch it.")
+                await self.send("❔ *Replies feed* · /replies on, /replies off, or /replies alone "
+                                "to switch it")
                 return
             on = argument == "on" if argument else not engine.replies_feed
             engine.set_replies_feed(on)
-            await self.send("Replies on: each message and the reply sent come here. /replies off "
-                            "stops it." if on else "Replies off.")
+            await self.send("💬 *Replies feed on* · each message and its reply come here · "
+                            "/replies off stops it" if on else "🔕 *Replies feed off*")
         elif command == "/verbose":
             await self.set_verbose(argument)
         elif command == "/catchup":
             await self.catchup(argument)
         elif command == "/settings":
-            await self.send(self.settings_text(), telegram=self.settings_text(telegram=True))
+            await self.send(self.settings_text())
         elif command == "/set":
             await self.set_setting(words[1].lower() if len(words) > 1 else "",
                                    " ".join(words[2:]))
@@ -409,111 +537,117 @@ class EncControl:
         elif command == "/reset":
             await self.reset_setting(argument)
         else:
-            await self.send("Unknown command. /help lists them.")
+            await self.send("❔ *Unknown command* · /help lists them")
 
     async def catchup(self, argument: str) -> None:
         engine = self.engine
         if argument == "stop":
-            await self.send("Stopping the catch-up." if engine.stop_catchup()
-                            else "No catch-up is going.")
+            await self.send("⏹️ *Stopping the catch-up*" if engine.stop_catchup()
+                            else "ℹ️ *No catch-up is going*")
             return
         try:
             days = float(argument)
         except ValueError:
             days = 0
         if not 0 < days <= 30:
-            await self.send("Use /catchup with a number of days from 1 to 30, e.g. /catchup 3. "
-                            "It answers unanswered messages from that time, older conversations "
-                            "included. /catchup stop cancels.")
+            await self.send("❔ *Catch-up* · /catchup 1-30 answers unanswered messages from that "
+                            "many days, older conversations too · /catchup stop cancels")
             return
         if engine.start_catchup(days, self.send):
-            await self.send(f"Catch-up: looking for unanswered messages from the last {days:g} "
-                            "days. The list comes next.")
+            await self.send(f"🔁 *Catch-up* · looking back {days:g} days · the list comes next")
         else:
-            await self.send("A catch-up is already going. /catchup stop cancels it.")
+            await self.send("⏳ *A catch-up is already going* · /catchup stop cancels it")
 
-    def settings_text(self, telegram: bool = False) -> str:
-        how = ("Change one: /set name value, e.g. /set poll 5-15 or /set dry_run on. "
-               "Ranges are random between the two numbers. /reset name or /reset all.")
-        if telegram:  # TELEGRAM-MIRROR: delete at M9
-            return ("*Settings* (a star marks one changed from the default)\n"
-                    f"{fence(settings.listing())}\n" + how)
-        rows = []
-        for name, tunable in settings.TUNABLES.items():
-            default = settings.DEFAULTS[name]
-            changed = getattr(settings.CONFIG, tunable.field) != default
-            value = settings.show(name) + (f" (default {settings.show(name, default)})"
-                                           if changed else "")
-            rows.append(f"- *{name}* = {value}. {tunable.help}")
-        return "\n".join(["## Settings", *rows, "---", how])
+    @staticmethod
+    def settings_text() -> str:
+        """Every setting, grouped, its value side by side with the others; a changed one in
+        bold with its default. /set name alone explains one."""
+        grouped = [n for names in SETTING_GROUPS.values() for n in names]
+        groups = {**SETTING_GROUPS,
+                  "Other": tuple(n for n in settings.TUNABLES if n not in grouped)}
+        changed = 0
+        lines = []
+        for group, names in groups.items():
+            facts = []
+            for name in names:
+                if name not in settings.TUNABLES:
+                    continue
+                default = settings.DEFAULTS[name]
+                if getattr(settings.CONFIG, settings.TUNABLES[name].field) != default:
+                    changed += 1
+                    facts.append(f"{name} *{settings.show(name)}* (default "
+                                 f"{settings.show(name, default)})")
+                else:
+                    facts.append(f"{name} {settings.show(name)}")
+            if facts:
+                lines.append(f"*{group}* " + DOT.join(facts))
+        title = "⚙️ *Settings* · " + (f"{changed} changed" if changed else "all default")
+        how = "_/set name value changes one, /set name explains it, /reset name or all undoes._"
+        return "\n".join([title, *lines, how])
 
     async def set_setting(self, name: str, value: str) -> None:
         name = name.replace("-", "_")
         if name not in settings.TUNABLES:
-            await self.send("Use /set name value. Names: "
-                            + ", ".join(settings.TUNABLES) + ". /settings shows them all.")
+            await self.send("❔ *Set* · /set name value · names: " + ", ".join(settings.TUNABLES)
+                            + " · /settings shows them")
             return
         tunable = settings.TUNABLES[name]
         if not value:
-            await self.send(f"{name} = *{settings.show(name)}*\n{tunable.help}\n"
-                            f"Change it with /set {name} value.")
+            await self.send(f"⚙️ *{name}* {settings.show(name)} · {tunable.help} · "
+                            f"/set {name} value changes it")
             return
         try:
             parsed = settings.parse(name, value)
             self.engine.change_setting(name, parsed)
         except ValueError as error:  # it may quote what the owner typed
-            await self.send(f"Not changed: {inline(error)}.", telegram=f"Not changed: {error}.")
+            await self.send(f"❌ *Not changed* · {inline(error)}")
             return
         note = ""
         if name == "scope" and parsed == "all":
-            note = ("\nThe bot may now answer in every one-to-one conversation, also ones "
+            note = ("\n⚠️ The bot may now answer in every one-to-one conversation, also ones "
                     "you started yourself.")
         if name == "dry_run" and parsed:
-            note = "\nNothing is sent or accepted until /set dry_run off."
-        await self.send(f"{name} = *{settings.show(name)}*. Kept across restarts; "
-                        f"/reset {name} goes back to {settings.show(name, settings.DEFAULTS[name])}."
-                        + note)
+            note = "\n⚠️ Nothing is sent or accepted until /set dry_run off."
+        await self.send(f"✅ *{name}* {settings.show(name)} · kept across restarts · /reset {name} "
+                        f"goes back to {settings.show(name, settings.DEFAULTS[name])}" + note)
 
     async def reset_setting(self, name: str) -> None:
         names = list(settings.TUNABLES) if name == "all" else [name.replace("-", "_")]
         if not name or names[0] not in settings.TUNABLES:
-            await self.send("Use /reset name or /reset all. /settings lists the names.")
+            await self.send("❔ *Reset* · /reset name or /reset all · /settings lists the names")
             return
         changed = [n for n in names
                    if getattr(settings.CONFIG, settings.TUNABLES[n].field) != settings.DEFAULTS[n]]
         for n in names:
             self.engine.change_setting(n, None)
         if name == "all":
-            await self.send("All settings back to their defaults"
-                            + (f" ({', '.join(changed)} changed)." if changed else "; none had "
-                               "been changed."))
+            await self.send("↩️ *All settings back to default* · "
+                            + (f"{', '.join(changed)} had changed" if changed
+                               else "none had changed"))
         else:
-            await self.send(f"{name} = *{settings.show(name)}* (default).")
+            await self.send(f"↩️ *{name}* {settings.show(name)} · the default")
 
-    def status_text(self, telegram: bool = False) -> str:
+    def status_text(self) -> str:
         engine = self.engine
         now = time.time()
         state = "paused" if engine.paused else engine.state
-        rows = [
-            f"Last successful LinkedIn check: {ago(now - engine.last_ok)}",
-            f"Since start: {engine.accepted} accepted, {engine.replies_sent} replies",
-            f"Replies feed: {'on' if engine.replies_feed else 'off'}",
-            f"Verbose: {self.verbose}",
-            f"Inbox check every {settings.show('poll')}, active {settings.show('active_hours')}"
-            + (", *dry run*" if CONFIG.dry_run else ""),
-        ]
-        if telegram:  # TELEGRAM-MIRROR: delete at M9
-            return "\n".join([f"State: *{state}*", *rows])
-        return "\n".join([f"## Status: {inline(state)}", *(f"- {row}" for row in rows)])
+        icon, name = STATES.get(state, ("⚪", inline(state, 40) or "Unknown"))
+        checked = f"last check {ago(now - engine.last_ok)}" if engine.last_ok else "no check yet"
+        return "\n".join([
+            f"{icon} *{name}* · {checked}",
+            (f"*Since start* {engine.accepted} accepted · "
+             f"{plural(engine.replies_sent, 'reply', 'replies')}"),
+            f"*Inbox* every {settings.show('poll')} · active {settings.show('active_hours')}"
+            + (" · *dry run*" if CONFIG.dry_run else ""),
+            f"*Feeds* replies {'on' if engine.replies_feed else 'off'} · verbose {self.verbose}",
+        ])
 
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:
-        """Each answered conversation: what came in and the reply, as quotes. A message's own
-        marks stay inert (marks.quote)."""
+        """Each answered conversation: who, each message as one quoted line, and the reply on
+        one line. Outside text stays inert and on its line (marks.inline)."""
         if not (self.enabled and self.engine.replies_feed):
             return
         who = inline(sender, 60) or "Someone"
-        text = f"### {who} wrote\n{quote(chr(10).join(incoming))}\n### You replied\n{quote(reply)}"
-        # TELEGRAM-MIRROR: delete at M9 (the old layout)
-        old = (sender or "Someone").replace("*", "")
-        await self.send(text, telegram=f"*{old}*:\n{fence(chr(10).join(incoming))}\n*You*:\n"
-                                      f"{fence(reply)}")
+        said = [f"> {line}" for message in incoming if (line := inline(message, 500))]
+        await self.send("\n".join([f"💬 *{who}*", *(said or ["> …"]),
+                                   f"↩️ *Reply* {inline(reply, 1500) or '…'}"]))

@@ -59,7 +59,7 @@ def test_daily_round_accepts_every_pending_invite(sim, monkeypatch):  # noqa: F8
 def test_optional_daily_accept_limit(sim, monkeypatch):  # noqa: F811
     bot = sim()
     _config(monkeypatch, max_accepts_per_day=1)
-    monkeypatch.setattr(engine_module, "alert", lambda text: None)
+    monkeypatch.setattr(engine_module, "alert", lambda *args, **kwargs: None)
     bot.api.invitations = [_invite("a", now_ms(-5)), _invite("b", now_ms(-5))]
     asyncio.run(bot.check_invitations())
     assert len(bot.api.accepted) == 1
@@ -79,7 +79,7 @@ def test_daily_reply_limit(sim, monkeypatch):  # noqa: F811
 def test_auth_error_stops_every_loop_and_backs_off(sim, monkeypatch):  # noqa: F811
     bot = sim()
     alerts = []
-    monkeypatch.setattr(engine_module, "alert", alerts.append)
+    monkeypatch.setattr(engine_module, "alert", lambda *args: alerts.append(" ".join(args)))
 
     async def recover():
         assert bot.state == "needs_login"  # Both loops are held while a person signs in.
@@ -96,7 +96,7 @@ def test_auth_error_stops_every_loop_and_backs_off(sim, monkeypatch):  # noqa: F
 
 def test_rate_limit_backs_off_longer_each_time(sim, monkeypatch):  # noqa: F811
     bot = sim()
-    monkeypatch.setattr(engine_module, "alert", lambda text: None)
+    monkeypatch.setattr(engine_module, "alert", lambda *args, **kwargs: None)
     asyncio.run(bot.on_error(RuntimeError("list threads: HTTP 429"), "inbox check"))
     first = bot.backoff_until - time.time()
     bot.backoff_until = 0

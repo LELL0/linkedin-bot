@@ -3,24 +3,25 @@
 import asyncio
 
 from bot import engine as engine_module
+from tests.test_enc import assert_compact
 from tests.test_engine_flow import ME, now_ms, settle, sim  # noqa: F401 - fixture
 
 DAY = 86400
 
 
-def run(bot, days, mirrored=None):
+def run(bot, days):
     reports = []
 
-    async def report(text, telegram=None):
+    async def report(text):
         reports.append(text)
-        if mirrored is not None:
-            mirrored.append(text if telegram is None else telegram)
 
     async def go():
         assert bot.start_catchup(days, report)
         await bot.catchup_task
 
     asyncio.run(go())
+    for text in reports:
+        assert_compact(text, 3)
     return reports
 
 
@@ -37,15 +38,12 @@ def test_old_messages_wait_for_the_command(sim, monkeypatch):  # noqa: F811
     bot.api.add("old", at=now_ms(-DAY))  # Before the bot started: normal polling skips it.
     asyncio.run(settle(bot))
     assert bot.api.sent == []
-    mirrored = []
-    reports = run(bot, 3, mirrored)
+    reports = run(bot, 3)
     assert [urn for urn, _ in bot.api.sent] == ["old"]
-    assert "1 conversation" in reports[0] and "1 of 1 answered" in reports[-1]
+    assert reports[-1] == "✅ *Catch-up done* · 1 of 1 answered"
     lines = reports[0].split("\n")
-    assert lines[0] == "## Catch-up: 1 conversation(s)" and lines[2].startswith("1. ")
-    # Telegram keeps the old one line text.
-    assert mirrored[0].startswith("Catch-up: 1 conversation(s) with unanswered messages from the")
-    assert "\n" not in mirrored[0] and mirrored[-1] == reports[-1]
+    assert lines[0] == "🔁 *Catch-up · 1 conversation* · last 3 days"
+    assert lines[1].startswith("*In order* ") and lines[2].startswith("*Pace* one every ")
 
 
 def test_only_unanswered_within_the_days(sim, monkeypatch):  # noqa: F811
@@ -62,7 +60,7 @@ def test_only_unanswered_within_the_days(sim, monkeypatch):  # noqa: F811
 def test_nothing_to_answer_is_reported(sim, monkeypatch):  # noqa: F811
     bot = sim()
     fast(monkeypatch)
-    assert "no unanswered messages" in run(bot, 2)[0]
+    assert run(bot, 2) == ["✅ *Catch-up* · no unanswered messages in the last 2 days"]
 
 
 def test_daily_reply_limit_stops_the_catchup(sim, monkeypatch):  # noqa: F811
@@ -76,7 +74,7 @@ def test_daily_reply_limit_stops_the_catchup(sim, monkeypatch):  # noqa: F811
     bot.api.add("b", at=now_ms(-DAY + 10))
     reports = run(bot, 3)
     assert len(bot.api.sent) == 1
-    assert "daily reply limit" in reports[-1]
+    assert reports[-1].startswith("⏸️ *Catch-up stopped* · daily reply limit · 1 answered · 1 left")
 
 
 def test_prompt_mentions_a_late_answer_only_when_late():
