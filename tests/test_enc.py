@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import enc, health
+from bot import enc, health, marks
 from bot.marks import BLOCK_START
 
 
@@ -25,20 +25,56 @@ ONE_LINERS = ("Use /", "I don't know ", "I only take commands")
 PROBLEM = re.compile(r"🟡|🔴|❌|fail|down|not sent|sign-in|limit", re.IGNORECASE)
 
 
+def assert_table(box: list[str]) -> None:
+    """A table code box: a header in capitals, then rows; every line at most 32 characters,
+    with no backtick and no emoji or wide character to push the columns out of line."""
+    assert box, "empty code box"
+    assert box[0] == box[0].upper(), f"header not in capitals: {box[0]!r}"
+    assert len(box) >= 2, f"a table needs rows: {box!r}"
+    for line in box:
+        assert len(line) <= marks.TABLE_WIDTH, f"table line too wide: {line!r}"
+        assert "`" not in line, line
+        assert all(marks._narrow(char) for char in line), f"wide character in {line!r}"
+
+
+def split_tables(text: str) -> tuple[list[str], list[list[str]]]:
+    """The message's lines outside code boxes, and the lines of each code box."""
+    outside: list[str] = []
+    boxes: list[list[str]] = []
+    box: list[str] | None = None
+    for line in text.split("\n"):
+        if line == "```":
+            if box is None:
+                box = []
+            else:
+                boxes.append(box)
+                box = None
+        elif box is not None:
+            box.append(line)
+        else:
+            outside.append(line)
+    assert box is None, f"code box not closed in {text!r}"
+    return outside, boxes
+
+
 def assert_style(text: str, max_lines: int) -> None:
     """The Enc Chat bot style (sdk/node/README.md "Keep bot messages small", v2 of
-    2026-11-25): a title line `<emoji> *LinkedIn · state*` with at most three facts, or a
-    one-line usage or refusal; every line at most 70 characters, a part's line at most three
-    facts; no heading, blank line, divider or code box; never 🟢 on a message that lists a
-    problem; and no more lines than the message's budget."""
-    lines = text.split("\n")
-    assert len(lines) <= max_lines, text
+    2026-11-25, tables 2026-11-25): a title line `<emoji> *LinkedIn · state*` with at most
+    three facts, or a one-line usage or refusal; every line at most 70 characters, a part's
+    line at most three facts; no heading, blank line or divider; a code box only as a table
+    (assert_table), at most two; never 🟢 on a message that lists a problem; and no more
+    lines than the message's budget (a table's lines count)."""
+    assert len(text.split("\n")) <= max_lines, text
+    lines, boxes = split_tables(text)
+    assert len(boxes) <= 2, f"more than two code boxes in {text!r}"
+    for box in boxes:
+        assert_table(box)
     assert all(len(line) <= enc.LINE_MAX for line in lines), \
         [line for line in lines if len(line) > enc.LINE_MAX]
     assert all(line.strip() for line in lines), f"blank line in {text!r}"
     assert not any(line.lstrip().startswith("#") for line in lines), f"heading in {text!r}"
     assert not any(DIVIDER.fullmatch(line) for line in lines), f"divider in {text!r}"
-    assert "```" not in text, f"code box in {text!r}"
+    assert "```" not in "\n".join(lines), f"code box mark outside a box in {text!r}"
     if lines[0].startswith(ONE_LINERS):
         assert len(lines) == 1, text
         return
@@ -684,8 +720,8 @@ def test_settings_lists_every_setting_grouped():
     assert_style(text, 8)
 
 
-def test_stats_are_a_few_short_parts():
-    now = 1.7e9 + 7200
+def test_stats_are_a_few_short_parts_and_two_tables():
+    now = 1.7e9 + 7200  # Wednesday 2023-11-15 02:13 in Beirut
     entries = [
         {"at": 1.7e9, "kind": "accept", "total_s": 3.0, "detect_s": 2.5, "action_s": 0.5,
          "via": "rest", "trigger": "realtime"},
@@ -693,22 +729,61 @@ def test_stats_are_a_few_short_parts():
          "messages": 2, "detect_s": 1.0, "quiet_s": 30.0, "draft_s": 4.0, "check_s": 1.2,
          "send_s": 3.0, "outcome": "question_blocked", "model": "*m*"},
     ] + [{"at": 1.7e9 + 120 + n, "kind": "reply", "total_s": 9000.0, "outcome": "draft_sent"}
-         for n in range(6)]
+         for n in range(6)] + [
+        {"at": 1.7e9 - 2 * 86400, "kind": "accept", "total_s": 400.0},
+        {"at": 1.7e9 - 9 * 86400, "kind": "reply", "total_s": 50.0},  # older than the table
+    ]
     text = enc.stats_text(entries, now=now)
     assert text.split("\n") == [
-        "ℹ️ *LinkedIn · stats* · 1 accept · 7 replies",
+        "ℹ️ *LinkedIn · stats* · 2 accepts · 8 replies",
         "*Latest* reply 117m ago · accept 2h ago",
-        "*Time to accept* typical 3.0s · 95% within 3.0s",
-        "*Time to reply* typical 2h 30m · 95% within 2h 30m",
-        "*Reply steps* seen after 1.0s · waited 30s · AI 4.0s",
         "*Written* 6 by the AI · 1 canned",
+        "```",
+        "DAY    ACCEPTS  REPLIES",
+        "today        1        7",
+        "Tue          -        -",
+        "Mon          1        -",
+        "Sun          -        -",
+        "Sat          -        -",
+        "Fri          -        -",
+        "Thu          -        -",
+        "```",
+        "```",
+        "TIME      TYPICAL     95%",
+        "accept     3m 22s  6m 40s",
+        "reply      2h 30m  2h 30m",
+        "- seen       1.0s    1.0s",
+        "- waited      30s     30s",
+        "- AI         4.0s    4.0s",
+        "```",
     ]
-    assert_style(text, 6)
-    assert enc.stats_text(entries[:1], now=now).split("\n") == [
+    assert_style(text, 21)
+    # Fewer than three timings: they stay lines; no day in the last week: no day table.
+    assert enc.stats_text(entries[:1], now=now + 8 * 86400).split("\n") == [
         "ℹ️ *LinkedIn · stats* · 1 accept · 0 replies",
-        "*Latest* accept 2h ago",
+        "*Latest* accept 8d ago",
         "*Time to accept* typical 3.0s · 95% within 3.0s",
     ]
+    assert enc.stats_text(entries[:1], now=now).split("\n")[3:5] == [
+        "DAY    ACCEPTS  REPLIES", "today        1        -"]
+
+
+def test_table_lines_up_and_fits_a_phone():
+    text = marks.table(["name", "cpu", "mem"],
+                       [["a very long container name here", 5, "1.2G"],
+                        ["db 🔥 `x`", 120, "64M"]], right=(1, 2))
+    lines = text.split("\n")
+    assert lines[0] == lines[-1] == "```"
+    assert_table(lines[1:-1])
+    assert lines[1:-1] == [
+        "NAME                   CPU   MEM",
+        "a very long containe…    5  1.2G",
+        "db 'x'                 120   64M",
+    ]
+    rows = [[f"row {n}", n] for n in range(15)]
+    many = marks.table(["what", "n"], rows, right=(1,)).split("\n")
+    assert len(many) == 2 + 1 + marks.TABLE_ROWS + 1 and many[-1] == "+3 more"
+    assert marks.cell("x" * 40, 10) == "xxxxxxxxx…"
 
 
 def test_durations_and_ages_read_the_same_everywhere():
