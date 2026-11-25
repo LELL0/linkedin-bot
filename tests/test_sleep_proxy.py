@@ -29,7 +29,7 @@ def make_bot(monkeypatch, **config):
     conf = dataclasses.replace(CONFIG, wake_jitter_s=(0.0, 0.0), **config)
     monkeypatch.setattr(engine_module, "CONFIG", conf)
     alerts: list[str] = []
-    monkeypatch.setattr(engine_module, "alert", alerts.append)
+    monkeypatch.setattr(engine_module, "alert", lambda *args: alerts.append(" ".join(args)))
     monkeypatch.setattr(engine_module, "write_status", lambda *a, **k: None)
     bot = Engine.__new__(Engine)
     bot.session = FakeSession()

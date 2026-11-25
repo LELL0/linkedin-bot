@@ -128,8 +128,8 @@ class Engine:
         warned = False
         while CONFIG.proxy and (problem := await asyncio.to_thread(proxy_problem, CONFIG.proxy)):
             if not warned:
-                alert(f"Not opening LinkedIn: {problem}. Start the home tunnel; "
-                      "the bot never uses the server's own address.")
+                alert("Not opening LinkedIn", f"{problem} · start the home tunnel; the bot "
+                      "never uses the server's own address", "🔴")
                 warned = True
             await self.idle("no_proxy", 60)
         if warned:
@@ -175,7 +175,8 @@ class Engine:
         warned = False
         while not (await self.session.has_auth_cookie() and self.session.signed_in):
             if not warned:
-                alert("Signed out or checkpoint. Sign in again in the bot's Chrome window.")
+                alert("Signed out or checkpoint", "sign in again in the bot's Chrome window",
+                      "🔴")
                 warned = True
             self.state = "needs_login"
             self.write_status()
@@ -217,7 +218,7 @@ class Engine:
         wait = min(CONFIG.backoff_s * 2 ** (self.failures - 1), CONFIG.max_backoff_s)
         wait *= random.uniform(1.0, 1.3)
         self.backoff_until = time.time() + wait
-        alert(f"LinkedIn pushed back ({reason}). No requests for {wait / 60:.0f} min.")
+        alert("LinkedIn pushed back", f"no requests for {wait / 60:.0f} min · {reason}", "🟠")
 
     async def on_error(self, error: Exception, what: str) -> None:
         if isinstance(error, AuthError):
@@ -342,7 +343,7 @@ class Engine:
             since = int((time.time() - days * 86400) * 1000)
             threads = await self.unanswered_since(days)
             if not threads:
-                await report(f"Catch-up: no unanswered messages in the last {days:g} days.")
+                await report(f"✅ *Catch-up* · no unanswered messages in the last {days:g} days")
                 return
             names = [next(iter(t.names.values()), "?") for t in threads]
             low, high = CONFIG.catchup_gap_s
@@ -354,8 +355,8 @@ class Engine:
                 while not await self.may_call():
                     pass
                 if self.at_limit("replies", CONFIG.max_replies_per_day):
-                    await report(f"Catch-up stopped at the daily reply limit: {answered} answered, "
-                                 f"{len(threads) - number} left. Send /catchup again tomorrow.")
+                    await report(f"⏸️ *Catch-up stopped* · daily reply limit · {answered} answered "
+                                 f"· {len(threads) - number} left · /catchup again tomorrow")
                     return
                 before = self.replies_sent
                 self.catchup_since[thread.urn] = since
@@ -364,17 +365,17 @@ class Engine:
                 finally:
                     self.catchup_since.pop(thread.urn, None)
                 answered += self.replies_sent > before
-            await report(f"Catch-up done: {answered} of {len(threads)} answered.")
+            await report(f"✅ *Catch-up done* · {answered} of {len(threads)} answered")
         except asyncio.CancelledError:
-            await report("Catch-up cancelled.")
+            await report("⏹️ *Catch-up cancelled*")
             raise
         except Exception as error:
             await self.on_error(error, "catch-up")
-            await report(f"Catch-up stopped: {inline(error)}")
+            await report(f"🔴 *Catch-up stopped* · {inline(error)}")
 
     def on_browser_closed(self, what: str) -> None:
         """Exit so the supervisor (Docker or run.sh) starts the bot with a fresh Chrome."""
-        alert(f"{what}, restarting with a new Chrome.")
+        alert(what, "restarting with a new Chrome", "🔄")
         logging.shutdown()
         os._exit(1)  # sys.exit inside a callback would not stop the loop.
 
@@ -395,10 +396,10 @@ class Engine:
             stalled = time.time() - self.last_ok
             limit = stale_poll_s()
             if self.state == "running" and stalled > limit:
-                alert(f"No successful inbox check for over {limit / 60:.0f} minutes.")
+                alert("No inbox check", f"none succeeded for over {limit / 60:.0f} min", "🔴")
             if self.state == "running" and stalled > 2 * limit:
                 # Exit so the supervisor (systemd or Docker) starts a fresh browser.
-                alert(f"Stuck for {int(stalled)}s, restarting.")
+                alert("Stuck, restarting", f"no inbox check for {int(stalled)}s", "🔄")
                 logging.shutdown()
                 os._exit(1)  # sys.exit inside a task may not stop the loop.
             idle = not self.workers and in_active_hours() and self.session.open
@@ -420,7 +421,8 @@ class Engine:
         key = f"{kind}:{date.today().isoformat()}"
         if key not in self.capped:
             self.capped.add(key)
-            alert(f"Daily limit of {limit} {kind} reached. The rest wait until tomorrow.")
+            alert("Daily limit reached", f"{limit} {kind} today · the rest wait until tomorrow",
+                  "🟡")
         return True
 
     async def check_invitations(self) -> None:
@@ -463,7 +465,7 @@ class Engine:
                 metrics.record("accept", **timing)
                 log.info("Accepted invitation: %s", timing)
             else:
-                alert("Could not accept an invitation.")
+                alert("Accept failed", "could not accept an invitation", "🟠")
                 continue
             self.store.add_accepted(invitation.inviter_id)
             self.store.add_seen_invite(invitation.urn)
@@ -606,5 +608,5 @@ class Engine:
             except RuntimeError as error:
                 log.warning("Send attempt %d failed: %s", attempt, error)
                 await asyncio.sleep(attempt)
-        alert("Could not send a reply after retries.")
+        alert("Reply not sent", "failed after retries", "🔴")
         raise RuntimeError("Send failed")

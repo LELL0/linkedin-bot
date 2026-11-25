@@ -121,17 +121,22 @@ def test_enc_set_interval_reset(monkeypatch):
     assert CONFIG.poll_s == (120.0, 240.0) and "2-4 min" in sent[-1]
     asyncio.run(tg.handle("/set max_replies 30"))
     assert CONFIG.max_replies_per_day == 30 and store.meta["setting:max_replies"] == "30"
+    assert sent[-1].startswith("✅ *max_replies* 30 · kept across restarts · /reset max_replies")
     asyncio.run(tg.handle("/settings"))
-    assert "\n- *poll* = 2-4 min (default 5-15 min). Random wait" in sent[-1]
-    assert "\n- *max_replies* = 30 (default 40). Replies per day at most" in sent[-1]
-    assert "\n- *dry_run* = off. on: only log" in sent[-1]  # unchanged: no default shown
+    assert sent[-1].startswith("⚙️ *Settings* · 2 changed\n")
+    assert "\n*Timing* poll *2-4 min* (default 5-15 min) · check_gap " in sent[-1]
+    assert "\n*Limits* max_replies *30* (default 40) · " in sent[-1]
+    assert "\n*Mode* dry_run off · scope " in sent[-1]  # unchanged: no default shown
+    asyncio.run(tg.handle("/set poll"))
+    assert sent[-1] == ("⚙️ *poll* 2-4 min · Random wait between inbox checks · "
+                        "/set poll value changes it")
     asyncio.run(tg.handle("/set poll 15-5"))
-    assert sent[-1].startswith("Not changed") and CONFIG.poll_s == (120.0, 240.0)
+    assert sent[-1].startswith("❌ *Not changed* · ") and CONFIG.poll_s == (120.0, 240.0)
     asyncio.run(tg.handle("/set nope 1"))
-    assert "Names:" in sent[-1]
+    assert "names: poll, " in sent[-1]
     asyncio.run(tg.handle("/reset all"))
     assert CONFIG.poll_s == settings.DEFAULTS["poll"] and CONFIG.max_replies_per_day == 40
-    assert "poll" in sent[-1] and "max_replies" in sent[-1]
+    assert sent[-1] == "↩️ *All settings back to default* · poll, max_replies had changed"
 
 
 def test_new_interval_cuts_a_long_wait_short(monkeypatch):
