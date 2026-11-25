@@ -58,9 +58,9 @@ def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
     health._last_sent.clear()
     health.alert("signed out")
     health.alert("signed out")
-    health.alert("Pushed back", "no requests for 5 min", "🟠")
-    health.alert("Pushed back", "no requests for 5 min", "🟠")
-    assert sent == ["⚠️ *signed out*", "🟠 *Pushed back* · no requests for 5 min"]
+    health.alert("on hold", "back in 5m", "🟡")
+    health.alert("on hold", "back in 5m", "🟡")
+    assert sent == ["🟡 *LinkedIn · signed out*", "🟡 *LinkedIn · on hold* · back in 5m"]
 
 
 def test_healthcheck_uses_the_limit_the_bot_wrote():

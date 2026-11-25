@@ -60,9 +60,25 @@ def test_parse_refuses_bad_values(name, text):
 
 
 def test_show_round_trips():
-    for name in settings.TUNABLES:
-        text = settings.show(name).removesuffix(f" {settings.TUNABLES[name].unit}")
+    for name in settings.TUNABLES:  # shown as typed: 5-15m, 60s, 8-24h
+        text = settings.show(name)
+        assert " " not in text
         assert settings.parse(name, text) == getattr(CONFIG, settings.TUNABLES[name].field)
+    assert settings.show("poll") == "5-15m" and settings.show("check_gap") == "60s"
+
+
+@pytest.mark.parametrize("name, text, error", [
+    ("poll", "0.5", "use 1 to 240m"),
+    ("poll", "15-5", "the first number is above the second"),
+    ("poll", "fast", "'fast' is not a number"),
+    ("max_replies", "2.5", "use a whole number"),
+    ("dry_run", "maybe", "use on or off"),
+    ("scope", "everyone", "use new_threads or all"),
+])
+def test_parse_errors_say_what_to_type(name, text, error):
+    with pytest.raises(ValueError) as caught:
+        settings.parse(name, text)
+    assert str(caught.value) == error
 
 
 def test_apply_is_kept_and_loaded_after_a_restart():
@@ -118,25 +134,37 @@ def control(monkeypatch):
 def test_enc_set_interval_reset(monkeypatch):
     tg, store, _changes, sent = control(monkeypatch)
     asyncio.run(tg.handle("/interval 2-4"))
-    assert CONFIG.poll_s == (120.0, 240.0) and "2-4 min" in sent[-1]
+    assert CONFIG.poll_s == (120.0, 240.0)
+    assert sent[-1] == ("✅ *LinkedIn · poll now 2-4m* · kept after restarts\n"
+                        "/reset poll goes back to 5-15m")
     asyncio.run(tg.handle("/set max_replies 30"))
     assert CONFIG.max_replies_per_day == 30 and store.meta["setting:max_replies"] == "30"
-    assert sent[-1].startswith("✅ *max_replies* 30 · kept across restarts · /reset max_replies")
+    assert sent[-1] == ("✅ *LinkedIn · max_replies now 30* · kept after restarts\n"
+                        "/reset max_replies goes back to 40")
     asyncio.run(tg.handle("/settings"))
-    assert sent[-1].startswith("⚙️ *Settings* · 2 changed\n")
-    assert "\n*Timing* poll *2-4 min* (default 5-15 min) · check_gap " in sent[-1]
-    assert "\n*Limits* max_replies *30* (default 40) · " in sent[-1]
-    assert "\n*Mode* dry_run off · scope " in sent[-1]  # unchanged: no default shown
+    assert sent[-1].startswith("ℹ️ *LinkedIn · settings* · 2 changed\n")
+    assert "\n*Inbox* poll *2-4m* · check_gap 60s · " in sent[-1]
+    assert "\n*Limits* max_replies *30* · " in sent[-1]
+    assert "\n*Mode* dry_run off · scope " in sent[-1]  # unchanged: plain
+    assert "\n*Defaults* poll 5-15m · max_replies 40\n" in sent[-1]
     asyncio.run(tg.handle("/set poll"))
-    assert sent[-1] == ("⚙️ *poll* 2-4 min · Random wait between inbox checks · "
-                        "/set poll value changes it")
+    assert sent[-1] == ("ℹ️ *LinkedIn · poll 2-4m* · random wait between inbox checks\n"
+                        "Default 5-15m · /set poll 2-4m changes it")
     asyncio.run(tg.handle("/set poll 15-5"))
-    assert sent[-1].startswith("❌ *Not changed* · ") and CONFIG.poll_s == (120.0, 240.0)
+    assert sent[-1] == "❌ *LinkedIn · poll not changed* · the first number is above the second"
+    assert CONFIG.poll_s == (120.0, 240.0)
+    asyncio.run(tg.handle("/set check_gap 3600"))
+    assert sent[-1] == "❌ *LinkedIn · check_gap not changed* · poll below check_gap 3600s"
+    asyncio.run(tg.handle("/set max_backoff 1"))
+    assert sent[-1] == "❌ *LinkedIn · max_backoff not changed* · max_backoff below backoff 5m"
     asyncio.run(tg.handle("/set nope 1"))
-    assert "names: poll, " in sent[-1]
+    assert sent[-1] == "I don't know the setting nope · /settings lists them"
+    asyncio.run(tg.handle("/reset poll"))
+    assert sent[-1] == "✅ *LinkedIn · poll back to 5-15m*"
+    asyncio.run(tg.handle("/set poll 2-4"))
     asyncio.run(tg.handle("/reset all"))
     assert CONFIG.poll_s == settings.DEFAULTS["poll"] and CONFIG.max_replies_per_day == 40
-    assert sent[-1] == "↩️ *All settings back to default* · poll, max_replies had changed"
+    assert sent[-1] == "✅ *LinkedIn · all settings default* · poll, max_replies had changed"
 
 
 def test_new_interval_cuts_a_long_wait_short(monkeypatch):

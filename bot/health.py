@@ -64,18 +64,20 @@ def check() -> int:
 _last_sent: dict[str, float] = {}
 
 
-def alert(title: str, detail: str = "", icon: str = "⚠️") -> None:
+def alert(state: str, detail: str = "", icon: str = "🟡") -> None:
     """Log, then tell the owner on Enc Chat (servers) or by a desktop notification (laptop).
 
-    [title] is the problem in a few words, [detail] what it means or how long it lasts, and
-    [icon] its weight: 🔴 needs the owner, 🟠 the bot waits, 🟡 a limit, 🔄 a restart."""
-    text = f"{title}: {detail}" if detail else title
+    [state] is the problem in one to four lowercase words ("sign-in needed"), [detail] what
+    it means and what to do, and [icon] a title emoji: 🔴 down until the owner acts, 🟡 the
+    bot waits or hit a limit, ❌ one thing failed, ⏳ restarting. The same words within the
+    hour are sent once."""
+    text = f"{state}: {detail}" if detail else state
     log.error("ALERT: %s", text)
     now = time.time()
     if now - _last_sent.get(text, 0) < ALERT_REPEAT_S:
         return
     _last_sent[text] = now
-    enc.notify(enc.alert_text(title, detail, icon))
+    enc.notify(enc.alert_text(state, detail, icon))
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],
