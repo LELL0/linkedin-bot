@@ -8,8 +8,11 @@ and "- [x] " (tasks), "> " (a quote), a line of --- (a divider), ``` lines aroun
 block, and [words](https://address) (a link in its own words). Apps 1.7.13 and older show
 the marks as typed, so every layout here still reads as plain text.
 
-Text from outside (names, messages, error strings) goes through inline(), quote() or
-fence() before it joins a message. The app has no escape character, so a mark that could
+A table is a code box laid out by table() (each cell through cell()), at most 32 characters a
+line so its columns stay in line on a phone.
+
+Text from outside (names, messages, error strings) goes through inline(), quote(), fence() or
+cell() before it joins a message. The app has no escape character, so a mark that could
 take effect is swapped for a look-alike instead (see inert()).
 """
 
@@ -94,3 +97,55 @@ def fence(text: object) -> str:
     """Text as a code block, drawn exactly as written, so marks inside it (a message's own
     asterisks) stay as typed. Three backticks in a row would end the block early."""
     return "```\n" + str(text).replace("```", "'''").strip("\n") + "\n```"
+
+
+# A table is a code box: the app draws it in a monospace font at 0.9 of the text size and
+# wraps it rather than scrolling, so a line longer than this breaks the columns on a phone.
+TABLE_WIDTH = 32
+TABLE_ROWS = 12  # rows shown; the rest become a "+N more" line under the box
+TABLE_GAP = "  "
+
+
+def _narrow(char: str) -> bool:
+    """A character that takes one cell of a monospace line: not an emoji, a symbol picture,
+    a wide (CJK) character, a joiner or a variation selector, which would push the columns
+    out of line."""
+    if unicodedata.east_asian_width(char) in "WF":
+        return False
+    if unicodedata.category(char) in ("So", "Cs", "Cf", "Mn", "Me", "Cc"):
+        return False
+    return not 0xFE00 <= ord(char) <= 0xFE0F
+
+
+def cell(value: object, limit: int = TABLE_WIDTH) -> str:
+    """One table cell: one line, no backtick (it could close the box), no character that is
+    wider than a column, at most [limit] characters (cut with …)."""
+    text = "".join(char for char in " ".join(str(value).split()) if _narrow(char))
+    text = " ".join(text.replace("`", "'").split())
+    if len(text) > limit:
+        text = text[: max(limit - 1, 0)].rstrip() + "…"
+    return text
+
+
+def table(head: list[str], rows: list[list[object]], right: tuple[int, ...] = ()) -> str:
+    """[rows] under a header in capitals, as a code box that lines up in monospace.
+
+    Columns are two spaces apart; the columns in [right] (numbers) line up on the right.
+    No line is wider than TABLE_WIDTH: the first column, the text one, is cut with … to make
+    room. At most TABLE_ROWS rows; a "+N more" line under the box counts the rest."""
+    shown = [[cell(value) for value in row] for row in rows[:TABLE_ROWS]]
+    head = [cell(name).upper() for name in head]
+    widths = [max(len(row[i]) for row in [head, *shown]) for i in range(len(head))]
+    over = sum(widths) + len(TABLE_GAP) * (len(widths) - 1) - TABLE_WIDTH
+    if over > 0:
+        widths[0] = max(widths[0] - over, 1)
+        head[0] = cell(head[0], widths[0])
+        shown = [[cell(row[0], widths[0]), *row[1:]] for row in shown]
+
+    def line(row: list[str]) -> str:
+        return TABLE_GAP.join(value.rjust(width) if i in right else value.ljust(width)
+                              for i, (value, width) in enumerate(zip(row, widths))).rstrip()
+
+    text = fence("\n".join(line(row) for row in [head, *shown]))
+    left = len(rows) - len(shown)
+    return text + (f"\n+{left} more" if left else "")

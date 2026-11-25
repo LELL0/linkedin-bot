@@ -13,8 +13,11 @@ phone is about 35 characters wide:
   bold, then at most one fact (title()). A message that lists a problem never starts with 🟢.
 - Each part after it is one line that starts with its name in bold, its facts side by side
   joined by " · ", at most three. No line is longer than LINE_MAX (70, two phone lines).
-- No headings, blank lines, dividers or code boxes; a "- " list only for log lines, a "> "
-  quote for what someone wrote.
+- No headings, blank lines or dividers; a "- " list only for log lines, a "> " quote for
+  what someone wrote.
+- A table where three or more things share the same facts (/stats: accepts and replies a
+  day, how long each takes): a code box laid out by marks.table(), a header in capitals, at
+  most 32 characters a line, at most two boxes a message. Everything else stays in lines.
 - Numbers read the same everywhere: durations 4.2s, 42s, 4m 12s, 2h 5m, 3d 4h; ages 7h ago;
   clock times 18:40 on the owner's clock (owner_time(), Beirut).
 - A refusal or a bad argument is one line that says what to type (`Use /verbose 0-5`).
@@ -39,7 +42,7 @@ from typing import TYPE_CHECKING
 from . import metrics, settings
 from .config import CONFIG
 from .enc_bot_client import Bot, EncBotError
-from .marks import inline, start_safe
+from .marks import inline, start_safe, table
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -388,9 +391,51 @@ def typical(entries: list[dict], field: str) -> list[str]:
             f"95% within {duration(metrics.percentile(values, 0.95))}"]
 
 
+# /stats timings: the table's row name, the kind of entry, the field. "- " rows are the parts
+# of a reply's time.
+TIMINGS = (("accept", "accept", "total_s"), ("reply", "reply", "total_s"),
+           ("- seen", "reply", "detect_s"), ("- waited", "reply", "quiet_s"),
+           ("- AI", "reply", "draft_s"))
+STATS_DAYS = 7  # days in the /stats table, today first
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def timings_table(groups: dict[str, list[dict]]) -> str | None:
+    """How long accepts, replies and a reply's parts take, typical and 95% within, as a
+    table; None when fewer than three of them have data (the lines read better then)."""
+    rows = []
+    for name, kind, field in TIMINGS:
+        values = [e[field] for e in groups[kind] if isinstance(e.get(field), (int, float))]
+        if values:
+            rows.append([name, duration(statistics.median(values)),
+                         duration(metrics.percentile(values, 0.95))])
+    return table(["time", "typical", "95%"], rows, right=(1, 2)) if len(rows) >= 3 else None
+
+
+def days_table(entries: list[dict], now: float) -> str | None:
+    """Accepts and replies a day for the last STATS_DAYS days on the owner's clock, today
+    first, then each day by its weekday (none repeats); - for none. None when none of the
+    days had any."""
+    today = owner_time(now).date()
+    counts = {today - timedelta(days=n): [0, 0] for n in range(STATS_DAYS)}
+    for entry in entries:
+        at = entry.get("at")
+        kind = entry.get("kind")
+        if isinstance(at, (int, float)) and kind in ("accept", "reply"):
+            day = counts.get(owner_time(at).date())
+            if day is not None:
+                day[kind == "reply"] += 1
+    if not any(sum(day) for day in counts.values()):
+        return None
+    rows = [["today" if day == today else WEEKDAYS[day.weekday()],
+             accepts or "-", replies or "-"] for day, (accepts, replies) in counts.items()]
+    return table(["day", "accepts", "replies"], rows, right=(1, 2))
+
+
 def stats_text(entries: list[dict], now: float | None = None) -> str:
-    """/stats: counts in the title, then when the latest happened, how long accepts and
-    replies take, where a reply's time goes, and who wrote the replies."""
+    """/stats: counts in the title, when the latest happened, who wrote the replies, then a
+    table of the last days' accepts and replies and one of how long they take (typical and
+    95% within, with where a reply's time goes)."""
     now = time.time() if now is None else now
     accepts = [e for e in entries if e.get("kind") == "accept"]
     replies = [e for e in entries if e.get("kind") == "reply"]
@@ -398,20 +443,23 @@ def stats_text(entries: list[dict], now: float | None = None) -> str:
         return title("ℹ️", "stats", "no accepts or replies yet")
     latest = [f"{kind} {ago(now - max(e.get('at', 0) for e in group))}"
               for kind, group in (("reply", replies), ("accept", accepts)) if group]
+    by_ai = sum(e.get("outcome") == "draft_sent" for e in replies)
+    canned = sum(e.get("outcome") not in (None, "", "draft_sent") for e in replies)
+    timings = timings_table({"accept": accepts, "reply": replies})
     steps = [f"{label} {duration(m)}" for label, field in
              (("seen after", "detect_s"), ("waited", "quiet_s"), ("AI", "draft_s"))
              if (m := median(replies, field)) is not None]
-    by_ai = sum(e.get("outcome") == "draft_sent" for e in replies)
-    canned = sum(e.get("outcome") not in (None, "", "draft_sent") for e in replies)
     lines = [
         title("ℹ️", "stats", f"{plural(len(accepts), 'accept')} · "
                              f"{plural(len(replies), 'reply', 'replies')}"),
         part("Latest", latest),
-        part("Time to accept", typical(accepts, "total_s")),
-        part("Time to reply", typical(replies, "total_s")),
-        part("Reply steps", steps),
         part("Written", [f"{by_ai} by the AI" if by_ai else None,
                          f"{canned} canned" if canned else None]),
+        days_table(entries, now),
+        timings,
+        None if timings else part("Time to accept", typical(accepts, "total_s")),
+        None if timings else part("Time to reply", typical(replies, "total_s")),
+        None if timings else part("Reply steps", steps),
     ]
     return "\n".join(line for line in lines if line)
 
