@@ -93,7 +93,6 @@ def test_broken_stored_value_falls_back_to_default():
 
 def control(monkeypatch):
     monkeypatch.setenv("ENC_BOT_SECRET", "s")
-    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
     store = MemoryStore()
     changes = []
 
@@ -109,7 +108,7 @@ def control(monkeypatch):
     tg = enc.EncControl(engine)
     sent = []
 
-    async def send(text, telegram=None):
+    async def send(text):
         sent.append(text)
 
     tg.send = send

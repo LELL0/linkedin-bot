@@ -1,7 +1,7 @@
 # LinkedIn reply bot on a server. Settings go in .env next to this file (AI_API_KEY, and
 # ENC_BOT_SECRET and ENC_OWNER (the owner's Enc user id) for the Enc Chat bot bot_linkedin; ENC_BOT_URL defaults to
-# http://enc-bot-agent:8787; until the trial ends TG_BOT_TOKEN plus TG_CHAT_ID for the Telegram
-# mirror). Data (Chrome profile with the LinkedIn login, state, logs, timings) lives in ./data.
+# http://enc-bot-agent:8787). The bot sends nothing to Telegram. Data (Chrome profile with the
+# LinkedIn login, state, logs, timings) lives in ./data.
 name: linkedin-bot
 
 services:

@@ -8,13 +8,11 @@ from tests.test_engine_flow import ME, now_ms, settle, sim  # noqa: F401 - fixtu
 DAY = 86400
 
 
-def run(bot, days, mirrored=None):
+def run(bot, days):
     reports = []
 
-    async def report(text, telegram=None):
+    async def report(text):
         reports.append(text)
-        if mirrored is not None:
-            mirrored.append(text if telegram is None else telegram)
 
     async def go():
         assert bot.start_catchup(days, report)
@@ -37,15 +35,11 @@ def test_old_messages_wait_for_the_command(sim, monkeypatch):  # noqa: F811
     bot.api.add("old", at=now_ms(-DAY))  # Before the bot started: normal polling skips it.
     asyncio.run(settle(bot))
     assert bot.api.sent == []
-    mirrored = []
-    reports = run(bot, 3, mirrored)
+    reports = run(bot, 3)
     assert [urn for urn, _ in bot.api.sent] == ["old"]
     assert "1 conversation" in reports[0] and "1 of 1 answered" in reports[-1]
     lines = reports[0].split("\n")
     assert lines[0] == "## Catch-up: 1 conversation(s)" and lines[2].startswith("1. ")
-    # Telegram keeps the old one line text.
-    assert mirrored[0].startswith("Catch-up: 1 conversation(s) with unanswered messages from the")
-    assert "\n" not in mirrored[0] and mirrored[-1] == reports[-1]
 
 
 def test_only_unanswered_within_the_days(sim, monkeypatch):  # noqa: F811

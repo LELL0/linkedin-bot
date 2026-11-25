@@ -52,15 +52,13 @@ def test_check_reads_the_status_file(tmp_path, monkeypatch):
 
 
 def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
-    sent, mirrored = [], []
+    sent = []
     monkeypatch.setattr(health.enc, "notify", sent.append)
-    monkeypatch.setattr(health.tg_mirror, "send_sync", mirrored.append)
     monkeypatch.setattr(health.shutil, "which", lambda name: None)
     health._last_sent.clear()
     health.alert("signed out")
     health.alert("signed out")
     assert sent == ["## Alert\nsigned out"]
-    assert mirrored == ["LinkedIn bot: signed out"]  # Telegram keeps the old text
 
 
 def test_healthcheck_uses_the_limit_the_bot_wrote():

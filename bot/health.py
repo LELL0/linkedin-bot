@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 
-from . import enc, tg_mirror
+from . import enc
 from .config import CONFIG
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,6 @@ def alert(text: str) -> None:
         return
     _last_sent[text] = now
     enc.notify(enc.alert_text(text))
-    tg_mirror.send_sync(f"LinkedIn bot: {text}")  # TELEGRAM-MIRROR: delete at M9
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],

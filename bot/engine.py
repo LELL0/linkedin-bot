@@ -346,14 +346,7 @@ class Engine:
                 return
             names = [next(iter(t.names.values()), "?") for t in threads]
             low, high = CONFIG.catchup_gap_s
-            await report(
-                catchup_text(names, days, (low, high)),
-                telegram=(  # TELEGRAM-MIRROR: delete at M9 (the old layout)
-                    f"Catch-up: {len(threads)} conversation(s) with unanswered messages from the "
-                    f"last {days:g} days: {', '.join(names)}. Answering one every "
-                    f"{low / 60:.0f}-{high / 60:.0f} min. /catchup stop cancels."
-                ),
-            )
+            await report(catchup_text(names, days, (low, high)))
             answered = 0
             for number, thread in enumerate(threads):
                 if number:
@@ -377,8 +370,7 @@ class Engine:
             raise
         except Exception as error:
             await self.on_error(error, "catch-up")
-            await report(f"Catch-up stopped: {inline(error)}",
-                         telegram=f"Catch-up stopped: {error}")  # TELEGRAM-MIRROR: delete at M9
+            await report(f"Catch-up stopped: {inline(error)}")
 
     def on_browser_closed(self, what: str) -> None:
         """Exit so the supervisor (Docker or run.sh) starts the bot with a fresh Chrome."""

@@ -190,12 +190,3 @@ def reset(name: str, store=None) -> None:
     if store is not None:
         store.set_meta(PREFIX + name, "")
 
-
-def listing() -> str:
-    """Every setting, its value, and a mark when it differs from the default."""
-    rows = []
-    for name, tunable in TUNABLES.items():
-        changed = getattr(CONFIG, tunable.field) != DEFAULTS[name]
-        default = f" (default {show(name, DEFAULTS[name])})" if changed else ""
-        rows.append(f"{'*' if changed else ' '} {name} = {show(name)}{default}\n    {tunable.help}")
-    return "\n".join(rows)

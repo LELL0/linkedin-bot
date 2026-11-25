@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import enc, health, tg_mirror
+from bot import enc, health
 
 
 OWNER = "01HZX3K9M2Q4R5S6T7V8W9XYZA"  # a 26 character Enc user id
@@ -106,8 +106,6 @@ def agent(monkeypatch):
     monkeypatch.setenv("ENC_BOT_SECRET", fake.secret)
     monkeypatch.delenv("ENC_BOT_SECRET_FILE", raising=False)
     monkeypatch.setenv("ENC_OWNER", OWNER)
-    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TG_CHAT_ID", raising=False)
     yield fake
     fake.close()
 
@@ -116,18 +114,15 @@ def control(monkeypatch):
     """A control whose send() records the text instead of reaching an agent."""
     monkeypatch.setenv("ENC_BOT_SECRET", "s")
     monkeypatch.setenv("ENC_OWNER", OWNER)
-    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
     engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
                              accepted=1, replies_sent=2, store=MemoryStore())
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     engine.set_replies_feed = lambda on: setattr(engine, "replies_feed", on)
     ec = enc.EncControl(engine)
     sent = []
-    ec.mirrored = []  # what the Telegram mirror would get
 
-    async def send(text, telegram=None):
+    async def send(text):
         sent.append(text)
-        ec.mirrored.append(text if telegram is None else telegram)
 
     ec.send = send
     return ec, engine, sent
@@ -152,7 +147,6 @@ def test_pause_resume_and_replies_toggle(monkeypatch):
     assert sent[-1].startswith("## Status: running\n- ")  # Enc Chat marks, never HTML
     assert "- Since start: 1 accepted, 2 replies" in sent[-1]
     assert "<b>" not in sent[-1]
-    assert ec.mirrored[-1].startswith("State: *running*\n")  # Telegram keeps the old text
 
 
 def test_reply_feed_quotes_with_marks_inert_and_only_when_on(monkeypatch):
@@ -163,8 +157,6 @@ def test_reply_feed_quotes_with_marks_inert_and_only_when_on(monkeypatch):
     asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```", "line one\n\n# not a heading"], "_ok_"))
     assert sent[0] == ("### Sam wrote\n> \u2217hi\u2217 '''x'''\n> line one\n> # not a heading\n"
                        "### You replied\n> \uff3fok\uff3f")
-    # Telegram keeps the old layout.
-    assert ec.mirrored[0].startswith("*Sam*:\n```\n*hi* '''x'''\nline one")
 
 
 def test_reply_feed_name_cannot_add_marks_or_lines(monkeypatch):
@@ -190,7 +182,6 @@ def test_events_become_commands_for_the_owner_only(monkeypatch):
     run({"type": "message", "id": "e4", "from": {"id": OWNER}, "text": "hello"})
     run({"type": "started", "id": "e5", "from": {"id": OWNER}})
     assert sent[-1].startswith("## LinkedIn bot\n- */status* ")
-    assert ec.mirrored[-1].startswith("*LinkedIn bot*\n- /status - ")
 
 
 def test_events_repeat_is_dropped(monkeypatch):
@@ -312,18 +303,24 @@ def test_stream_commands_reach_the_engine_and_commands_are_registered(agent, mon
     enc.logging.getLogger().removeHandler(ec.verbose_log)
 
 
-def test_telegram_mirror_sends_while_its_variables_are_set(agent, monkeypatch):
-    posts = []
-    monkeypatch.setattr(tg_mirror.httpx, "post", lambda url, **kw: posts.append((url, kw["json"])))
+def test_nothing_goes_to_telegram_even_with_its_old_variables_set(agent, monkeypatch):
+    import pathlib
+
+    import httpx
+
+    calls = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: calls.append(a))
+    monkeypatch.setattr(health.shutil, "which", lambda name: None)
+    monkeypatch.setenv("TG_BOT_TOKEN", "123:FAKETOKEN")
+    monkeypatch.setenv("TG_CHAT_ID", "42")
     ec = enc.EncControl(SimpleNamespace(verbose=0))
     asyncio.run(ec.send("*one*"))
-    assert posts == []  # variables unset: Enc Chat only
-    monkeypatch.setenv("TG_BOT_TOKEN", "t")
-    monkeypatch.setenv("TG_CHAT_ID", "42")
-    asyncio.run(ec.send("*two*"))
-    assert [m["text"] for m in agent.sent] == ["*one*", "*two*"]
-    assert posts[0][1] == {"chat_id": "42", "text": "*two*", "disable_web_page_preview": True}
-    assert "parse_mode" not in posts[0][1]
+    health._last_sent.clear()
+    health.alert("signed out")
+    assert calls == [] and len(agent.sent) == 2  # both went to Enc Chat only
+    source = " ".join(p.read_text() for p in pathlib.Path(enc.__file__).parent.glob("*.py"))
+    assert "api.telegram.org" not in source and "TG_BOT_TOKEN" not in source
+    enc.logging.getLogger().removeHandler(ec.verbose_log)
 
 
 def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
@@ -349,7 +346,6 @@ def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
     asyncio.run(ec.handle("/verbose"))
     assert sent[-1].startswith("## Verbose level 2\n")
     assert "\n- */verbose 2 - level 1" in sent[-1] and "\n- /verbose 3 - " in sent[-1]
-    assert ec.mirrored[-1].startswith("Verbose level: *2*\n")
     asyncio.run(ec.handle("/verbose off"))
     assert engine.verbose == 0
     asyncio.run(ec.handle("/status"))
@@ -358,7 +354,7 @@ def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
     enc.apply_log_level(0)
 
 
-def test_record_levels_and_telegram_token_never_sent(monkeypatch):
+def test_record_levels(monkeypatch):
     make = enc.logging.getLogger("x").makeRecord
 
     def level(name, levelno, text):
@@ -370,14 +366,7 @@ def test_record_levels_and_telegram_token_never_sent(monkeypatch):
     assert level("bot.engine", 20, "alive: accepted=0") == 4
     assert level("bot.engine", 10, "detail") == 5
     assert level("playwright", 20, "x") == 5
-    assert level("httpx", 40, "POST https://api.telegram.org/botSECRET/x") == 6
-    ec, engine, sent = control(monkeypatch)
-    engine.verbose = 5
-    monkeypatch.setenv("TG_BOT_TOKEN", "123:FAKETOKEN")
-    ec.verbose_log.lines.append((1, "url /bot123:FAKETOKEN/x"))
-    asyncio.run(ec.send_verbose())
-    assert "***" in sent[-1] and "FAKETOKEN" not in sent[-1]
-    enc.logging.getLogger().removeHandler(ec.verbose_log)
+    assert level("httpx", 40, "POST https://ai.example/v1/chat") == 6
 
 
 def test_catchup_command_checks_days_and_stop(monkeypatch):
@@ -400,11 +389,7 @@ def test_commands_fit_the_agent_rules():
         assert re.fullmatch(r"[a-z0-9_]{1,32}", name) and 1 <= len(description) <= 120
 
 
-def test_telegram_mirror_keeps_the_old_texts(agent, monkeypatch):
-    posts = []
-    monkeypatch.setattr(tg_mirror.httpx, "post", lambda url, **kw: posts.append(kw["json"]["text"]))
-    monkeypatch.setenv("TG_BOT_TOKEN", "t")
-    monkeypatch.setenv("TG_CHAT_ID", "42")
+def test_commands_reach_enc_chat_through_the_agent(agent, monkeypatch):
     engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
                              accepted=0, replies_sent=0, verbose=0)
     engine.set_paused = lambda on: setattr(engine, "paused", on)
@@ -412,11 +397,10 @@ def test_telegram_mirror_keeps_the_old_texts(agent, monkeypatch):
     for text in ("/help", "/status", "/settings", "/pause"):
         asyncio.run(ec.handle(text))
     enc_texts = [m["text"] for m in agent.sent]
-    assert enc_texts[0] == enc.HELP and posts[0] == enc.HELP_TELEGRAM
-    assert enc_texts[1].startswith("## Status: running") and posts[1].startswith("State: *running*")
+    assert enc_texts[0] == enc.HELP
+    assert enc_texts[1].startswith("## Status: running")
     assert enc_texts[2].startswith("## Settings\n- *poll* = ")
-    assert posts[2].startswith("*Settings* (a star marks one changed from the default)\n```")
-    assert enc_texts[3] == posts[3] and enc_texts[3].startswith("Paused")  # unchanged texts
+    assert enc_texts[3].startswith("Paused")
     enc.logging.getLogger().removeHandler(ec.verbose_log)
 
 
@@ -427,7 +411,6 @@ def test_layouts_are_short_lines_and_lists(monkeypatch):
     assert all(line.startswith("- */") for line in lines[1:])
     asyncio.run(ec.handle("/stats"))
     assert sent[-1].startswith("## Stats\n```\n") and sent[-1].endswith("\n```")
-    assert ec.mirrored[-1].startswith("```\n")
     asyncio.run(ec.handle("/verbose loud"))
     assert sent[-1].startswith("Use /verbose with a level from 0 to 5.\n## Verbose level 0\n")
 
@@ -437,7 +420,6 @@ def test_set_error_quoting_the_owner_stays_inert(monkeypatch):
     engine.change_setting = lambda name, value: None
     asyncio.run(ec.handle("/set poll *x*"))
     assert sent[-1] == "Not changed: '\u2217x\u2217' is not a number."
-    assert ec.mirrored[-1] == "Not changed: '*x*' is not a number."
 
 
 def test_alert_text_is_a_heading_and_one_safe_line():
