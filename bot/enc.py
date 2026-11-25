@@ -7,15 +7,21 @@ POST /v1/messages (bot/enc_bot_client.py). The agent already admits only the own
 module checks the sender again and fails closed: ENC_OWNER is required (an Enc user id, or
 "@username"), and with it unset or malformed every command is ignored.
 
-Every message is written the way a person texts, because a chat bubble on a phone is about
-35 characters wide (Enc Chat's "Keep bot messages small"): the first line is an emoji, a
-*bold* title and the fact that matters; each part after it is one line that starts with its
-name in bold, its facts side by side joined by " · ". No headings, blank lines or dividers;
-a "- " list only for items that stand alone (log lines), a "> " quote for what someone
-wrote, and at most one code box, for a real table. Enc Chat 1.7.14 draws the marks; older
-apps show them as typed, so each message also reads as plain text. Text from outside
-(names, messages, errors) goes through marks.inline() first, so it stays on one line and
-cannot add a mark of its own. The bot sends nothing to Telegram.
+Every message follows the Enc Chat bot style (v2, 2026-11-25), because a chat bubble on a
+phone is about 35 characters wide:
+- The first line is the title: a state emoji (TITLE_EMOJI), then `*LinkedIn · state*` in
+  bold, then at most one fact (title()). A message that lists a problem never starts with 🟢.
+- Each part after it is one line that starts with its name in bold, its facts side by side
+  joined by " · ", at most three. No line is longer than LINE_MAX (70, two phone lines).
+- No headings, blank lines, dividers or code boxes; a "- " list only for log lines, a "> "
+  quote for what someone wrote.
+- Numbers read the same everywhere: durations 4.2s, 42s, 4m 12s, 2h 5m, 3d 4h; ages 7h ago;
+  clock times 18:40 on the owner's clock (owner_time(), Beirut).
+- A refusal or a bad argument is one line that says what to type (`Use /verbose 0-5`).
+- /help and the "/" menu come from the same COMMANDS list, so they always match.
+Enc Chat 1.7.14 draws the marks; older apps show them as typed, so each message also reads as
+plain text. Text from outside (names, messages, errors) goes through marks.inline() first, so
+it stays on its line and cannot add a mark of its own. The bot sends nothing to Telegram.
 """
 
 import asyncio
@@ -27,48 +33,73 @@ import statistics
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from . import metrics, settings
 from .config import CONFIG
 from .enc_bot_client import Bot, EncBotError
-from .marks import fence, inline
+from .marks import inline, start_safe
 
 if TYPE_CHECKING:
     from .engine import Engine
 
 log = logging.getLogger(__name__)
 
+SUBJECT = "LinkedIn"  # the name in every title
 DOT = " · "
+LINE_MAX = 70  # characters of one line: two lines of a phone's chat bubble
+# The emoji a title may start with, and what each one says.
+TITLE_EMOJI = {
+    "🟢": "all well",
+    "🟡": "needs a look",
+    "🔴": "down or broken",
+    "✅": "done",
+    "❌": "failed",
+    "🆕": "new",
+    "ℹ️": "information",
+    "⏳": "in progress",
+}
+
+
+def title(emoji: str, state: str, fact: str = "") -> str:
+    """The first line of a message: the state emoji, *LinkedIn · state* in bold (one to four
+    words), then at most one fact."""
+    if emoji not in TITLE_EMOJI:
+        raise ValueError(f"not a title emoji: {emoji}")
+    return f"{emoji} *{SUBJECT} · {state}*" + (DOT + fact if fact else "")
+
+
+# Each command: its name, the argument /help shows, and what it does. /help and the app's
+# "/" menu list exactly these, most used first.
 COMMANDS = [
-    ("status", "Running, signed in, last check"),
-    ("stats", "Accepts and replies, and how fast"),
-    ("pause", "Stop accepting and answering until /resume"),
-    ("resume", "Start accepting and answering again"),
-    ("replies", "Each message and the reply sent: /replies on or off"),
-    ("catchup", "Answer unanswered messages from the last N days: /catchup 3, /catchup stop"),
-    ("verbose", "The bot's log while it runs: /verbose 0-5 (0 off, 5 everything)"),
-    ("settings", "Timings, limits and other settings, and how to change them"),
-    ("set", "Change a setting: /set poll 5-15, /set max_replies 30"),
-    ("reset", "Back to the default: /reset poll, /reset all"),
-    ("interval", "Random wait between inbox checks, in minutes: /interval 5-15"),
-    ("help", "List the commands"),
+    ("status", "", "Is it running, last inbox check"),
+    ("pause", "", "Stop accepting and answering"),
+    ("resume", "", "Accept and answer again"),
+    ("stats", "", "Accepts, replies and how fast"),
+    ("replies", "on/off", "Show me each reply it sends"),
+    ("catchup", "1-30", "Answer missed messages, days back"),
+    ("verbose", "0-5", "Send me its log, 0 is off"),
+    ("settings", "", "List timings and limits"),
+    ("set", "name value", "Change one setting"),
+    ("reset", "name/all", "Put settings back to default"),
+    ("help", "", "This list"),
 ]
-# The "/" menu (COMMANDS) says what each command does; /help only groups them.
-HELP = "\n".join([
-    "🤖 *LinkedIn bot* · commands",
-    "*Watch* /status · /stats · /replies on or off · /verbose 0-5",
-    "*Control* /pause · /resume · /catchup 3 · /catchup stop",
-    "*Settings* /settings · /set poll 5-15 · /reset all · /interval 5-15",
-    "_The / menu says what each one does._",
-])
-CATCHUP_NAMES = 20  # names listed when a catch-up starts; the rest are counted
+# Names that still work but are not listed: /start opens the chat, /interval is /set poll.
+HIDDEN = ("start", "interval")
+
+
+def help_line(name: str, argument: str, description: str) -> str:
+    return f"/{name}{' ' + argument if argument else ''}{DOT}{description}"
+
+
+HELP = "\n".join([title("ℹ️", "help", "I accept invites and answer messages for you"),
+                  *(help_line(*command) for command in COMMANDS)])
 MAX_MESSAGE = 4000
-VERBOSE_LIMIT = 3500  # characters of log per message; older lines are left out
-VERBOSE_LINE = 200  # characters of one log line
-STATS_LATEST = 5  # rows in the /stats table of the latest accepts and replies
-TABLE_WIDTH = 31  # a code box line, so it fits a phone's chat bubble
+VERBOSE_LIMIT = 2100  # characters of log per message (about 30 lines); older lines left out
+QUOTE_LINES = 3  # lines of one incoming message in the replies feed
+QUOTES = 8  # lines of incoming messages in one feed message
+REPLY_LINES = 4  # lines of the reply in the replies feed
 # /verbose levels: what each sends, the short name in the list of levels, and seconds
 # between the messages with the log.
 VERBOSE_LEVELS = {
@@ -79,23 +110,30 @@ VERBOSE_LEVELS = {
     4: ("everything with the heartbeat", "+ heartbeat", 30),
     5: ("everything, debug and libraries too", "+ debug", 30),
 }
-# How /status and alerts name the engine's state.
+# How /status names the engine's state, and what the owner can do about it.
 STATES = {
-    "running": ("🟢", "Running"),
-    "paused": ("⏸️", "Paused"),
-    "needs_login": ("🔴", "Signed out"),
-    "no_proxy": ("🟠", "No home tunnel"),
-    "asleep": ("😴", "Asleep"),
-    "starting": ("⏳", "Starting"),
+    "running": ("🟢", "running"),
+    "paused": ("🟡", "paused"),
+    "needs_login": ("🔴", "sign-in needed"),
+    "no_proxy": ("🔴", "home tunnel down"),
+    "asleep": ("ℹ️", "asleep"),
+    "starting": ("⏳", "starting"),
 }
-# /settings groups; a setting in no group is listed under Other.
-SETTING_GROUPS = {
-    "Timing": ("poll", "check_gap", "reply_delay", "accept_gap", "catchup_gap"),
+NEXT_STEP = {
+    "paused": "/resume starts it again",
+    "needs_login": "sign in again over VNC",
+    "no_proxy": "start it so LinkedIn can open",
+}
+# /settings: one line each, at most three settings a line; a setting in none is under Other.
+SETTING_LINES = {
+    "Inbox": ("poll", "check_gap", "reply_delay"),
+    "Pauses": ("accept_gap", "catchup_gap"),
     "Hours": ("active_hours", "invite_window"),
-    "Limits": ("max_replies", "max_accepts", "backoff", "max_backoff"),
+    "Limits": ("max_replies", "max_accepts"),
+    "Back-off": ("backoff", "max_backoff"),
     "Mode": ("dry_run", "scope"),
 }
-LOG_ICONS = {logging.WARNING: "⚠️ ", logging.ERROR: "🔴 ", logging.CRITICAL: "🔴 "}
+LOG_ICONS = {logging.WARNING: "🟡", logging.ERROR: "🔴", logging.CRITICAL: "🔴"}
 KEY_ACTIONS = ("Accepted invitation", "Replied", "Paused", "Resumed", "Running", "DRY RUN")
 # Never forwarded: the HTTP client logs a line per request (each AI call), noise the owner
 # does not need, and a request's address is no business of the chat.
@@ -103,6 +141,25 @@ NEVER_FORWARDED = ("httpx", "httpcore")
 OWNER_ID = re.compile(r"[0-9A-Za-z]{26}")  # an Enc user id (ULID)
 OWNER_NAME = re.compile(r"@[A-Za-z0-9_]{1,30}")
 SEEN_EVENTS = 500  # event ids kept to drop a repeat: the agent delivers at least once
+# The owner's clock (Beirut): UTC+2, and UTC+3 in summer time.
+WINTER = timezone(timedelta(hours=2))
+SUMMER = timezone(timedelta(hours=3))
+
+
+def last_sunday(year: int, month: int) -> date:
+    """The last Sunday of [month] (March or October)."""
+    last = date(year, month + 1, 1) - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() + 1) % 7)
+
+
+def owner_time(at: float) -> datetime:
+    """[at] (a Unix time) on the owner's clock in Beirut: summer time (UTC+3) from the last
+    Sunday of March 00:00 to the last Sunday of October 00:00 local, else UTC+2. The
+    container's own TZ is another zone, so local time is not the owner's."""
+    utc = datetime.fromtimestamp(at, timezone.utc)
+    starts = datetime.combine(last_sunday(utc.year, 3), datetime.min.time(), WINTER)
+    ends = datetime.combine(last_sunday(utc.year, 10), datetime.min.time(), SUMMER)
+    return utc.astimezone(SUMMER if starts <= utc < ends else WINTER)
 
 
 def record_level(record: logging.LogRecord) -> int:
@@ -122,68 +179,162 @@ def record_level(record: logging.LogRecord) -> int:
     return 4 if message.startswith("alive:") else 3
 
 
-def every_text(seconds: int) -> str:
-    return f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"
+def duration(seconds: float) -> str:
+    """A duration the way the owner reads it: 4.2s, 42s, 4m 12s, 2h 5m, 3d 4h."""
+    if seconds < 10:
+        return f"{max(seconds, 0):.1f}s"
+    seconds = round(seconds)
+    for size, unit, small_size, small in ((86400, "d", 3600, "h"), (3600, "h", 60, "m"),
+                                          (60, "m", 1, "s")):
+        if seconds >= size:
+            big, rest = divmod(seconds, size)
+            rest //= small_size
+            return f"{big}{unit}" + (f" {rest}{small}" if rest else "")
+    return f"{seconds}s"
 
 
-def plural(count: int, word: str, words: str = "") -> str:
-    return f"{count} {word if count == 1 else words or word + 's'}"
+def ago(seconds: float) -> str:
+    """How long ago, in one unit: 45s ago, 5m ago, 7h ago, 3d ago."""
+    seconds = max(int(seconds), 0)
+    if seconds < 120:
+        return f"{seconds}s ago"
+    if seconds < 7200:
+        return f"{seconds // 60}m ago"
+    if seconds < 172800:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
-def levels_line() -> str:
-    return "*Levels* " + DOT.join(f"{n} {short}" for n, (_, short, _) in VERBOSE_LEVELS.items())
+def plural(count: float, word: str, words: str = "") -> str:
+    return f"{count:g} {word if count == 1 else words or word + 's'}"
+
+
+def days_text(days: float) -> str:
+    return plural(days, "day")
+
+
+def minutes_range(low_s: float, high_s: float) -> str:
+    """A range of seconds in minutes: 1.5-5m, or 2m when both ends are the same."""
+    low, high = (f"{round(v / 60, 1):g}" for v in (low_s, high_s))
+    return f"{low}m" if low == high else f"{low}-{high}m"
+
+
+def part(name: str, facts: list[str | None]) -> str | None:
+    """One line of a message: its name in bold, then the facts that have data."""
+    facts = [fact for fact in facts if fact]
+    return f"*{name}* " + DOT.join(facts) if facts else None
+
+
+def wrap(text: str, width: int, most: int, first: int = 0) -> list[str]:
+    """One line of [text] cut into lines of at most [width] characters ([first] for the
+    first one) at spaces, at most [most] lines; the last ends in … when text is left out."""
+    out: list[str] = []
+    line = ""
+    for word in text.split():
+        room = first if first and not out else width
+        candidate = f"{line} {word}" if line else word
+        if len(candidate) <= room:
+            line = candidate
+            continue
+        if line:
+            out.append(line)
+            room = width
+        while len(word) > room:
+            out.append(word[:room])
+            word = word[room:]
+            room = width
+        line = word
+    if line:
+        out.append(line)
+    if len(out) > most:
+        out = out[:most]
+        room = first if first and most == 1 else width
+        out[-1] = out[-1][:room - 1].rstrip() + "…"
+    return out
+
+
+def levels_lines() -> list[str]:
+    levels = [f"{n} {short}" for n, (_, short, _) in VERBOSE_LEVELS.items()]
+    return ["*Levels* " + DOT.join(levels[:3]), "*More levels* " + DOT.join(levels[3:])]
+
+
+def level_title(emoji: str, level: int) -> str:
+    text = VERBOSE_LEVELS[level][0]
+    return title(emoji, "log off", "only alerts come here") if not level else \
+        title(emoji, f"log level {level}", text)
 
 
 def verbose_help(current: int) -> str:
-    text, _, every = VERBOSE_LEVELS[current]
-    title = f"📜 *Verbose {current}* · {text}" + (f" · log every {every_text(every)}" if every else "")
-    return "\n".join([title, levels_line(), "_/verbose 0-5 changes it._"])
+    every = VERBOSE_LEVELS[current][2]
+    how = "/verbose 0-5 changes it" + (f" · sent every {duration(every)}" if every else "")
+    return "\n".join([level_title("ℹ️", current), *levels_lines(), how])
 
 
-def alert_text(title: str, detail: str = "", icon: str = "⚠️") -> str:
-    """A health alert on one line: an emoji, the problem in bold, then what it means. Alerts
-    can carry error strings, so both parts are made inert and kept on the line."""
-    line = f"{icon} *{inline(title, 100) or 'Alert'}*"
-    return line + (f" · {inline(detail, 1000)}" if detail.strip() else "")
+def alert_text(state: str, detail: str = "", emoji: str = "🟡") -> str:
+    """A health alert on one line: the state emoji, *LinkedIn · the problem*, then what it
+    means or what to do, cut to fit the line. Alerts can carry error strings, so both parts
+    are made inert and kept on the line."""
+    head = title(emoji if emoji in TITLE_EMOJI else "🟡", inline(state, 40) or "alert")
+    if not detail.strip():
+        return head
+    return head + DOT + inline(detail, max(LINE_MAX - len(head) - len(DOT), 20))
 
 
 def catchup_text(names: list[str], days: float, gap: tuple[float, float]) -> str:
-    """The catch-up's plan: how many conversations, their names in answer order, the pace."""
-    shown = [inline(name, 40) or "?" for name in names[:CATCHUP_NAMES]]
+    """The catch-up's plan: how many conversations, the names that fit one line in answer
+    order, the pace."""
+    shown: list[str] = []
+    for number, name in enumerate(names):
+        name = inline(name, 30) or "?"
+        left = len(names) - number - 1
+        line = "*In order* " + ", ".join([*shown, name]) + (f" and {left} more" if left else "")
+        if len(line) > LINE_MAX:
+            break
+        shown.append(name)
     more = len(names) - len(shown)
     return "\n".join([
-        f"🔁 *Catch-up · {plural(len(names), 'conversation')}* · last {days:g} days",
-        "*In order* " + DOT.join(shown) + (f" · and {more} more" if more else ""),
-        f"*Pace* one every {gap[0] / 60:.0f}-{gap[1] / 60:.0f} min · /catchup stop cancels",
+        title("⏳", f"catch-up, {len(names)} to answer", f"last {days_text(days)}"),
+        "*In order* " + ", ".join(shown) + (f" and {more} more" if more else ""),
+        f"*Pace* one every {minutes_range(*gap)} · /catchup stop ends it",
     ])
 
 
+def catchup_limit_text(answered: int, left: int) -> str:
+    return "\n".join([title("🟡", "catch-up stopped", "daily reply limit reached"),
+                      f"*So far* {answered} answered · {left} left · /catchup again tomorrow"])
+
+
 def verbose_message(lines: list[str], limit: int = VERBOSE_LIMIT) -> str:
-    """Log lines for one message: a title, then the newest lines that fit as a list, each
-    on one line, cut to a sane length and made inert."""
+    """Log lines for one message: a title (🟡 when a line is a warning or an error), then
+    the newest lines that fit as a list, each on one line, cut to fit and made inert."""
     kept: list[str] = []
     size = 0
     for line in reversed(lines):
-        line = inline(line, VERBOSE_LINE)
+        line = inline(line, LINE_MAX - 2)
         size += len(line) + 3
         if size > limit:
             break
         kept.append(line)
+    kept.reverse()
     left_out = len(lines) - len(kept)
-    title = f"📜 *Log* · {plural(len(kept), 'line')}"
-    if left_out:
-        title += f" · {left_out} earlier left out"
-    return "\n".join([title, *(f"- {line}" for line in reversed(kept))])
+    problems = sum(line.startswith(tuple(LOG_ICONS.values())) for line in kept)
+    fact = plural(len(kept), "line") + (f" · {left_out} older left out" if left_out else "")
+    head = (title("🟡", f"log, {plural(problems, 'problem')}", fact) if problems
+            else title("ℹ️", "log", fact))
+    return "\n".join([head, *(f"- {line}" for line in kept)])
 
 
 class ChatLogFormatter(logging.Formatter):
-    """A log record as one short line: time, an emoji for a warning or an error, the module,
-    the message, and for an exception only its last line (no traceback)."""
+    """A log record as one short line: an emoji for a warning or an error, the time on the
+    owner's clock, the module only when it is not the bot's own, the message, and for an
+    exception only its last line (no traceback)."""
 
     def format(self, record: logging.LogRecord) -> str:
-        name = record.name.removeprefix("bot.")
-        icon = LOG_ICONS.get(record.levelno, "")
-        text = f"{self.formatTime(record, '%H:%M:%S')} {icon}{name}: {record.getMessage()}"
+        icon = LOG_ICONS.get(record.levelno)
+        when = owner_time(record.created).strftime("%H:%M")
+        own = record.name == "bot" or record.name.startswith("bot.")
+        text = f"{icon + ' ' if icon else ''}{when} {'' if own else record.name + ': '}"
+        text += record.getMessage()
         if record.exc_info and record.exc_info[1] is not None:
             last = traceback.format_exception_only(record.exc_info[1])[-1].strip()
             text += f" ({last})"
@@ -223,95 +374,61 @@ def apply_log_level(level: int) -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def ago(seconds: float) -> str:
-    seconds = int(seconds)
-    if seconds < 120:
-        return f"{seconds}s ago"
-    if seconds < 7200:
-        return f"{seconds // 60} min ago"
-    if seconds < 172800:
-        return f"{seconds // 3600} h ago"
-    return f"{seconds // 86400} days ago"
+def median(entries: list[dict], field: str) -> float | None:
+    values = [e[field] for e in entries if isinstance(e.get(field), (int, float))]
+    return statistics.median(values) if values else None
 
 
-def span(seconds: float, short: bool = False) -> str:
-    """A duration the way a person says it: 4.2s, 41s, 3.1 min, 2.5 h (short: 3.1m)."""
-    minute, hour = ("m", "h") if short else (" min", " h")
-    if seconds < 10:
-        return f"{seconds:.1f}s"
-    if seconds < 90:
-        return f"{seconds:.0f}s"
-    if seconds < 5400:
-        return f"{seconds / 60:.1f}{minute}"
-    return f"{seconds / 3600:.1f}{hour}"
-
-
-def timing(entries: list[dict], field: str) -> str | None:
-    """The median and 95th percentile of a timing field, or None without data."""
+def typical(entries: list[dict], field: str) -> list[str]:
+    """The median and the 95th percentile of a timing field, in plain words."""
     values = [e[field] for e in entries if isinstance(e.get(field), (int, float))]
     if not values:
-        return None
-    return f"{span(statistics.median(values))} median, {span(metrics.percentile(values, 0.95))} p95"
+        return []
+    return [f"typical {duration(statistics.median(values))}",
+            f"95% within {duration(metrics.percentile(values, 0.95))}"]
 
 
-def median(entries: list[dict], field: str) -> str | None:
-    values = [e[field] for e in entries if isinstance(e.get(field), (int, float))]
-    return span(statistics.median(values)) if values else None
-
-
-def tally(entries: list[dict], field: str) -> str:
-    """How often each value of a field came up, most first: "rest 10, page 2"."""
-    found = collections.Counter(str(e.get(field, "unknown")) for e in entries)
-    return ", ".join(f"{inline(name, 40)} {count}" for name, count in found.most_common(4))
-
-
-def part(name: str, facts: list[str | None]) -> str | None:
-    """One line of a message: its name in bold, then the facts that have data."""
-    facts = [fact for fact in facts if fact]
-    return f"*{name}* " + DOT.join(facts) if facts else None
-
-
-def latest_table(entries: list[dict]) -> str:
-    """The latest accepts and replies as a code box: when, which, how long, how it went."""
-    rows = []
-    for entry in sorted(entries, key=lambda e: e["at"])[-STATS_LATEST:]:
-        when = datetime.fromtimestamp(entry["at"]).strftime("%d/%m %H:%M")
-        detail = str(entry.get("via") or entry.get("outcome") or "")
-        detail = detail.removeprefix("draft_").replace("rejected_", "rej_").replace("question_", "q_")
-        row = f"{when} {entry['kind'][:6]:<6} {span(entry.get('total_s') or 0, short=True):>5} {detail}"
-        rows.append(row[:TABLE_WIDTH].rstrip())
-    return fence("\n".join(rows))
-
-
-def stats_text(entries: list[dict]) -> str:
-    """/stats: counts in the title, one line per part, the latest few in one small table."""
+def stats_text(entries: list[dict], now: float | None = None) -> str:
+    """/stats: counts in the title, then when the latest happened, how long accepts and
+    replies take, where a reply's time goes, and who wrote the replies."""
+    now = time.time() if now is None else now
     accepts = [e for e in entries if e.get("kind") == "accept"]
     replies = [e for e in entries if e.get("kind") == "reply"]
     if not (accepts or replies):
-        return "📊 *Stats* · no accepts or replies yet"
-    answered = sum(e.get("messages", 1) for e in replies)
-    lines = [(f"📊 *Stats* · {plural(len(accepts), 'accept')} · "
-              f"{plural(len(replies), 'reply', 'replies')} to {plural(answered, 'message')}")]
-    if accepts:
-        lines += [
-            part("Accepts", [f"invite to accept {t}" if (t := timing(accepts, "total_s")) else None,
-                             f"noticed {m}" if (m := median(accepts, "detect_s")) else None,
-                             f"call {m}" if (m := median(accepts, "action_s")) else None]),
-            part("Accepts via", [tally(accepts, "via"), f"seen by {tally(accepts, 'trigger')}"]),
-        ]
-    if replies:
-        steps = [("noticed", "detect_s"), ("quiet", "quiet_s"), ("draft", "draft_s"),
-                 ("check", "check_s"), ("send", "send_s")]
-        lines += [
-            part("Replies", [f"first message to reply {t}"
-                             if (t := timing(replies, "total_s")) else None,
-                             f"last to reply {m}" if (m := median(replies, "since_last_s")) else None]),
-            part("Reply steps", [f"{name} {m}" for name, field in steps
-                                 if (m := median(replies, field))]),
-            part("Outcomes", [tally(replies, "outcome"), f"models {tally(replies, 'model')}"]),
-        ]
-    lines.append(latest_table(accepts + replies))
+        return title("ℹ️", "stats", "no accepts or replies yet")
+    latest = [f"{kind} {ago(now - max(e.get('at', 0) for e in group))}"
+              for kind, group in (("reply", replies), ("accept", accepts)) if group]
+    steps = [f"{label} {duration(m)}" for label, field in
+             (("seen after", "detect_s"), ("waited", "quiet_s"), ("AI", "draft_s"))
+             if (m := median(replies, field)) is not None]
+    by_ai = sum(e.get("outcome") == "draft_sent" for e in replies)
+    canned = sum(e.get("outcome") not in (None, "", "draft_sent") for e in replies)
+    lines = [
+        title("ℹ️", "stats", f"{plural(len(accepts), 'accept')} · "
+                             f"{plural(len(replies), 'reply', 'replies')}"),
+        part("Latest", latest),
+        part("Time to accept", typical(accepts, "total_s")),
+        part("Time to reply", typical(replies, "total_s")),
+        part("Reply steps", steps),
+        part("Written", [f"{by_ai} by the AI" if by_ai else None,
+                         f"{canned} canned" if canned else None]),
+    ]
     return "\n".join(line for line in lines if line)
+
+
+def example(name: str) -> str:
+    """A value to show in "/set name value": the current one, or the other choice."""
+    tunable = settings.TUNABLES[name]
+    value = getattr(settings.CONFIG, tunable.field)
+    if tunable.kind == "bool":
+        return "off" if value else "on"
+    if tunable.kind == "choice":
+        return next(choice for choice in tunable.choices if choice != value)
+    return settings.show(name)
+
+
+def changed(name: str) -> bool:
+    return getattr(settings.CONFIG, settings.TUNABLES[name].field) != settings.DEFAULTS[name]
 
 
 def client_from_env() -> Bot | None:
@@ -378,8 +495,9 @@ class EncControl:
                 log.warning("Enc Chat send failed: %s", error.code)
 
     async def register_commands(self) -> None:
-        """Fill the app's "/" menu; try again until the agent answers."""
-        commands = [{"command": c, "description": d} for c, d in COMMANDS]
+        """Fill the app's "/" menu (the same list as /help); try again until the agent
+        answers."""
+        commands = [{"command": name, "description": text} for name, _, text in COMMANDS]
         while True:
             try:
                 await asyncio.to_thread(self.bot.set_commands, commands)
@@ -439,19 +557,23 @@ class EncControl:
         return bool(username) and "@" + username.lstrip("@").lower() == wanted
 
     async def on_event(self, event: dict) -> None:
-        """One agent event: a command, or /start. Repeats and strangers are dropped silently."""
+        """One agent event: a command, /start, or a plain message from the owner (answered
+        with a pointer to /help). Repeats and strangers are dropped silently."""
         event_id = str(event.get("id") or "")
         if event_id:
             if event_id in self.seen:
                 return
             self.seen.append(event_id)
         kind = event.get("type")
-        if kind not in ("command", "started"):
+        if kind not in ("command", "started", "message"):
             return
         if not self.is_owner(event.get("from") or {}):
             return  # Only the owner; strangers get nothing.
         if kind == "started":
             await self.send(HELP)
+            return
+        if kind == "message":
+            await self.send("I only take commands · /help lists them")
             return
         args = event.get("args") or ""
         if isinstance(args, (list, tuple)):
@@ -480,25 +602,25 @@ class EncControl:
             return
         word = {"off": "0", "on": "3"}.get(argument, argument)
         if not (word.isdigit() and int(word) in VERBOSE_LEVELS):
-            await self.send(f"❔ *Verbose {current}* stays · use a level from 0 to 5\n"
-                            + levels_line())
+            await self.send(f"Use /verbose 0-5 · it stays at {current}")
             return
         level = int(word)
         self.engine.set_verbose(level)
         apply_log_level(level)
         self.verbose_log.take(0)  # start from new lines only
-        text, _, every = VERBOSE_LEVELS[level]
-        if not level:
-            await self.send(f"📜 *Verbose 0* · {text}")
-            return
-        await self.send(f"📜 *Verbose {level}* · {text} · log every {every_text(every)} · "
-                        "/verbose 0 stops it")
+        every = VERBOSE_LEVELS[level][2]
+        text = level_title("✅", level)
+        if level:
+            text += f"\nSent every {duration(every)} · /verbose 0 stops it"
+        await self.send(text)
 
     async def handle(self, text: str) -> None:
         if not text.startswith("/"):
             return
         words = text.split()
         command = words[0].split("@")[0].lower()
+        if command == "/interval":  # the old name of /set poll
+            command, words = "/set", ["/set", "poll", *words[1:]]
         argument = words[1].lower() if len(words) > 1 else ""
         engine = self.engine
         if command in ("/start", "/help"):
@@ -508,21 +630,17 @@ class EncControl:
         elif command == "/stats":
             await self.send(stats_text(metrics.load(CONFIG.metrics_path)))
         elif command == "/pause":
-            engine.set_paused(True)
-            await self.send("⏸️ *Paused* · no accepts or replies until /resume · messages that "
-                            "come meanwhile get answered then, unless you reply first")
+            await self.pause(True)
         elif command == "/resume":
-            engine.set_paused(False)
-            await self.send("▶️ *Resumed* · accepting and answering again")
+            await self.pause(False)
         elif command == "/replies":
             if argument not in ("", "on", "off"):
-                await self.send("❔ *Replies feed* · /replies on, /replies off, or /replies alone "
-                                "to switch it")
+                await self.send("Use /replies on or /replies off")
                 return
             on = argument == "on" if argument else not engine.replies_feed
             engine.set_replies_feed(on)
-            await self.send("💬 *Replies feed on* · each message and its reply come here · "
-                            "/replies off stops it" if on else "🔕 *Replies feed off*")
+            await self.send(title("✅", "replies on", "each message and its reply come here")
+                            if on else title("✅", "replies off", "/replies on brings them back"))
         elif command == "/verbose":
             await self.set_verbose(argument)
         elif command == "/catchup":
@@ -530,124 +648,165 @@ class EncControl:
         elif command == "/settings":
             await self.send(self.settings_text())
         elif command == "/set":
-            await self.set_setting(words[1].lower() if len(words) > 1 else "",
-                                   " ".join(words[2:]))
-        elif command == "/interval":
-            await self.set_setting("poll", " ".join(words[1:]))
+            await self.set_setting(argument, " ".join(words[2:]))
         elif command == "/reset":
             await self.reset_setting(argument)
         else:
-            await self.send("❔ *Unknown command* · /help lists them")
+            await self.send(f"I don't know {inline(command, 30)} · /help lists what I can do")
+
+    async def pause(self, paused: bool) -> None:
+        engine = self.engine
+        if engine.paused == paused:
+            await self.send(title("ℹ️", "already paused", "/resume starts it again") if paused
+                            else title("ℹ️", "not paused", "/status shows what it does"))
+            return
+        engine.set_paused(paused)
+        if paused:
+            await self.send("\n".join([
+                title("✅", "paused", "no accepts or replies until /resume"),
+                "Messages meanwhile get answered then, unless you reply first",
+            ]))
+        else:
+            await self.send(title("✅", "resumed", "accepting and answering again"))
 
     async def catchup(self, argument: str) -> None:
         engine = self.engine
         if argument == "stop":
-            await self.send("⏹️ *Stopping the catch-up*" if engine.stop_catchup()
-                            else "ℹ️ *No catch-up is going*")
+            progress = engine.stop_catchup()
+            if progress is None:
+                await self.send(title("ℹ️", "no catch-up running"))
+            else:
+                answered, total = progress
+                await self.send(title("✅", "catch-up stopped",
+                                      f"{answered} of {total} answered" if total
+                                      else "before it began"))
             return
         try:
             days = float(argument)
         except ValueError:
             days = 0
         if not 0 < days <= 30:
-            await self.send("❔ *Catch-up* · /catchup 1-30 answers unanswered messages from that "
-                            "many days, older conversations too · /catchup stop cancels")
+            await self.send("Use /catchup 1-30 (days back) or /catchup stop")
             return
         if engine.start_catchup(days, self.send):
-            await self.send(f"🔁 *Catch-up* · looking back {days:g} days · the list comes next")
+            await self.send(title("⏳", "catch-up", f"looking back {days_text(days)}…"))
         else:
-            await self.send("⏳ *A catch-up is already going* · /catchup stop cancels it")
+            await self.send(title("❌", "catch-up already running", "/catchup stop ends it"))
 
     @staticmethod
     def settings_text() -> str:
-        """Every setting, grouped, its value side by side with the others; a changed one in
-        bold with its default. /set name alone explains one."""
-        grouped = [n for names in SETTING_GROUPS.values() for n in names]
-        groups = {**SETTING_GROUPS,
+        """Every setting, a line per kind, its value side by side with the others; a changed
+        one in bold, with its default on a line of its own."""
+        grouped = [n for names in SETTING_LINES.values() for n in names]
+        groups = {**SETTING_LINES,
                   "Other": tuple(n for n in settings.TUNABLES if n not in grouped)}
-        changed = 0
         lines = []
         for group, names in groups.items():
-            facts = []
-            for name in names:
-                if name not in settings.TUNABLES:
-                    continue
-                default = settings.DEFAULTS[name]
-                if getattr(settings.CONFIG, settings.TUNABLES[name].field) != default:
-                    changed += 1
-                    facts.append(f"{name} *{settings.show(name)}* (default "
-                                 f"{settings.show(name, default)})")
-                else:
-                    facts.append(f"{name} {settings.show(name)}")
-            if facts:
-                lines.append(f"*{group}* " + DOT.join(facts))
-        title = "⚙️ *Settings* · " + (f"{changed} changed" if changed else "all default")
-        how = "_/set name value changes one, /set name explains it, /reset name or all undoes._"
-        return "\n".join([title, *lines, how])
+            names = [n for n in names if n in settings.TUNABLES]
+            for start in range(0, len(names), 3):
+                lines.append(f"*{group}* " + DOT.join(
+                    f"{n} *{settings.show(n)}*" if changed(n) else f"{n} {settings.show(n)}"
+                    for n in names[start:start + 3]))
+        moved = [n for n in settings.TUNABLES if changed(n)]
+        defaults = [f"{n} {settings.show(n, settings.DEFAULTS[n])}" for n in moved]
+        lines += ["*Defaults* " + DOT.join(defaults[start:start + 3])
+                  for start in range(0, len(defaults), 3)]
+        emoji = "🟡" if settings.CONFIG.dry_run else "ℹ️"
+        head = title(emoji, "settings", f"{len(moved)} changed" if moved else "all default")
+        how = "/set name explains · /set name value changes · /reset name undoes"
+        return "\n".join([head, *lines, how])
 
     async def set_setting(self, name: str, value: str) -> None:
         name = name.replace("-", "_")
+        if not name:
+            await self.send("Use /set name value · /settings lists the names")
+            return
         if name not in settings.TUNABLES:
-            await self.send("❔ *Set* · /set name value · names: " + ", ".join(settings.TUNABLES)
-                            + " · /settings shows them")
+            await self.send(f"I don't know the setting {inline(name, 30)} · "
+                            "/settings lists them")
             return
         tunable = settings.TUNABLES[name]
+        default = settings.show(name, settings.DEFAULTS[name])
         if not value:
-            await self.send(f"⚙️ *{name}* {settings.show(name)} · {tunable.help} · "
-                            f"/set {name} value changes it")
+            await self.send("\n".join([
+                title("ℹ️", f"{name} {settings.show(name)}", tunable.help),
+                f"Default {default} · /set {name} {example(name)} changes it",
+            ]))
             return
         try:
             parsed = settings.parse(name, value)
             self.engine.change_setting(name, parsed)
         except ValueError as error:  # it may quote what the owner typed
-            await self.send(f"❌ *Not changed* · {inline(error)}")
+            await self.send(alert_text(f"{name} not changed", str(error), "❌"))
             return
-        note = ""
-        if name == "scope" and parsed == "all":
-            note = ("\n⚠️ The bot may now answer in every one-to-one conversation, also ones "
-                    "you started yourself.")
         if name == "dry_run" and parsed:
-            note = "\n⚠️ Nothing is sent or accepted until /set dry_run off."
-        await self.send(f"✅ *{name}* {settings.show(name)} · kept across restarts · /reset {name} "
-                        f"goes back to {settings.show(name, settings.DEFAULTS[name])}" + note)
+            text = [title("🟡", "dry run on", "nothing is sent or accepted"),
+                    "/set dry_run off ends it"]
+        elif name == "scope" and parsed == "all":
+            text = [title("🟡", "scope all", "may answer chats you started too"),
+                    f"/reset scope goes back to {default}"]
+        else:
+            text = [title("✅", f"{name} now {settings.show(name)}", "kept after restarts")]
+            if changed(name):
+                text.append(f"/reset {name} goes back to {default}")
+        await self.send("\n".join(text))
 
     async def reset_setting(self, name: str) -> None:
-        names = list(settings.TUNABLES) if name == "all" else [name.replace("-", "_")]
-        if not name or names[0] not in settings.TUNABLES:
-            await self.send("❔ *Reset* · /reset name or /reset all · /settings lists the names")
+        if not name:
+            await self.send("Use /reset name or /reset all · /settings lists the names")
             return
-        changed = [n for n in names
-                   if getattr(settings.CONFIG, settings.TUNABLES[n].field) != settings.DEFAULTS[n]]
+        names = list(settings.TUNABLES) if name == "all" else [name.replace("-", "_")]
+        if names[0] not in settings.TUNABLES:
+            await self.send(f"I don't know the setting {inline(name, 30)} · "
+                            "/settings lists them")
+            return
+        moved = [n for n in names if changed(n)]
         for n in names:
             self.engine.change_setting(n, None)
         if name == "all":
-            await self.send("↩️ *All settings back to default* · "
-                            + (f"{', '.join(changed)} had changed" if changed
-                               else "none had changed"))
+            fact = ("none had changed" if not moved
+                    else f"{', '.join(moved)} had changed" if len(moved) <= 3
+                    else f"{len(moved)} had changed")
+            await self.send(title("✅", "all settings default", fact))
         else:
-            await self.send(f"↩️ *{name}* {settings.show(name)} · the default")
+            await self.send(title("✅", f"{names[0]} back to {settings.show(names[0])}"))
 
     def status_text(self) -> str:
+        """/status: the state and what to do about it first, then the inbox, the counts since
+        the start, and what comes to this chat."""
         engine = self.engine
-        now = time.time()
         state = "paused" if engine.paused else engine.state
-        icon, name = STATES.get(state, ("⚪", inline(state, 40) or "Unknown"))
-        checked = f"last check {ago(now - engine.last_ok)}" if engine.last_ok else "no check yet"
-        return "\n".join([
-            f"{icon} *{name}* · {checked}",
-            (f"*Since start* {engine.accepted} accepted · "
+        emoji, name = STATES.get(state, ("🟡", inline(state, 30) or "unknown"))
+        dry_run = settings.CONFIG.dry_run
+        if state == "running" and dry_run:
+            emoji, name = "🟡", "running, dry run"
+        checked = (f"checked {ago(time.time() - engine.last_ok)}" if engine.last_ok
+                   else "no check yet")
+        step = NEXT_STEP.get(state)
+        log_level = f"log level {self.verbose}" if self.verbose else "log off"
+        lines = [
+            title(emoji, name, step or checked),
+            "Nothing is sent or accepted · /set dry_run off" if dry_run else None,
+            part("Inbox", [checked if step else None, f"every {settings.show('poll')}",
+                           f"hours {settings.show('active_hours')}"]),
+            (f"*Since start* {plural(engine.accepted, 'accept')} · "
              f"{plural(engine.replies_sent, 'reply', 'replies')}"),
-            f"*Inbox* every {settings.show('poll')} · active {settings.show('active_hours')}"
-            + (" · *dry run*" if CONFIG.dry_run else ""),
-            f"*Feeds* replies {'on' if engine.replies_feed else 'off'} · verbose {self.verbose}",
-        ])
+            f"*In this chat* replies {'on' if engine.replies_feed else 'off'} · {log_level}",
+        ]
+        return "\n".join(line for line in lines if line)
 
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:
-        """Each answered conversation: who, each message as one quoted line, and the reply on
-        one line. Outside text stays inert and on its line (marks.inline)."""
+        """Each answered conversation: who, each message quoted, and the reply. Long text is
+        cut into lines that fit; outside text stays inert (marks.inline)."""
         if not (self.enabled and self.engine.replies_feed):
             return
-        who = inline(sender, 60) or "Someone"
-        said = [f"> {line}" for message in incoming if (line := inline(message, 500))]
-        await self.send("\n".join([f"💬 *{who}*", *(said or ["> …"]),
-                                   f"↩️ *Reply* {inline(reply, 1500) or '…'}"]))
+        who = inline(sender, 30) or "someone"
+        quoted = [f"> {line}" for message in incoming if (text := inline(message, 1000))
+                  for line in wrap(text, LINE_MAX - 2, QUOTE_LINES)]
+        if len(quoted) > QUOTES:
+            quoted = [*quoted[:QUOTES - 1], "> …"]
+        label = "↩️ *Reply* "
+        answer = wrap(inline(reply, 2000) or "…", LINE_MAX, REPLY_LINES,
+                      first=LINE_MAX - len(label))
+        await self.send("\n".join([title("🆕", f"replied to {who}"), *(quoted or ["> …"]),
+                                   label + answer[0], *(start_safe(a) for a in answer[1:])]))

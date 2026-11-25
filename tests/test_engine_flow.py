@@ -112,7 +112,7 @@ def sim(tmp_path, monkeypatch):
         bot.recovering = asyncio.Lock()
         bot.backoff_until, bot.failures, bot.last_check = 0.0, 0, 0.0
         bot.capped, bot.asleep = set(), False
-        bot.catchup_since, bot.catchup_task = {}, None
+        bot.catchup_since, bot.catchup_task, bot.catchup_progress = {}, None, None
         bot.paused = bot.replies_feed = False
         bot.enc = SimpleNamespace(reply_sent=_no_feed)
         return bot
