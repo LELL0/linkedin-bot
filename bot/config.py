@@ -72,8 +72,13 @@ class Config:  # Not frozen: bot.settings changes some fields from Enc Chat.
     reply_delay_s: tuple[float, float] = _range("REPLY_DELAY_S", "25-150")
     # /catchup: pause between two old conversations it answers.
     catchup_gap_s: tuple[float, float] = _range("CATCHUP_GAP_S", "90-300")
-    max_accepts_per_day: int = int(os.environ.get("MAX_ACCEPTS_PER_DAY", "0"))  # 0: all
+    max_accepts_per_day: int = int(os.environ.get("MAX_ACCEPTS_PER_DAY", "40"))  # 0: all
     max_replies_per_day: int = int(os.environ.get("MAX_REPLIES_PER_DAY", "40"))
+    # Hard daily caps on top of the schedule, so no bug, chat or restart loop can make the
+    # account busier than a person: inbox checks (past this only the planned ones run) and
+    # times Chrome opens LinkedIn (past this it stays closed until the next day).
+    max_checks_per_day: int = int(os.environ.get("MAX_CHECKS_PER_DAY", "80"))
+    max_opens_per_day: int = int(os.environ.get("MAX_OPENS_PER_DAY", "24"))
     # Waits after LinkedIn pushes back (429, 999, 5xx) or rejects the session, doubling
     # each time up to the maximum.
     backoff_s: float = 300.0

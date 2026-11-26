@@ -940,7 +940,8 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     answers = iter(["proxy 172.17.0.1:1080 does not answer (ConnectionRefusedError)", ""])
     monkeypatch.setattr(engine_module, "proxy_problem", lambda proxy: next(answers))
     bot = SimpleNamespace(idle=nothing, session=SimpleNamespace(start=nothing),
-                          wait_for_session=nothing)
+                          wait_for_session=nothing, at_limit=lambda *a: False,
+                          count=lambda kind: None)
     asyncio.run(engine_module.Engine.wake(bot))
 
     cookies = iter([False, True])
@@ -952,8 +953,9 @@ def test_engine_alerts_fit_one_line(monkeypatch):
                           write_status=lambda: None)
     asyncio.run(engine_module.Engine.wait_for_session(bot))
     engine_module.Engine.push_back(SimpleNamespace(failures=1, backoff_until=0), "HTTP 429")
-    engine_module.Engine.at_limit(SimpleNamespace(today=lambda kind: 40, capped=set()),
-                                  "replies", 40)
+    for kind in ("replies", "checks", "opens"):
+        engine_module.Engine.at_limit(SimpleNamespace(today=lambda kind: 40, capped=set(),
+                                                      day=engine_module.Engine.day), kind, 40)
     monkeypatch.setattr(engine_module.os, "_exit", lambda code: None)
     monkeypatch.setattr(engine_module.logging, "shutdown", lambda: None)
     engine_module.Engine.on_browser_closed(SimpleNamespace(), "Bot tab closed")
@@ -977,7 +979,8 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     with pytest.raises(RuntimeError):
         asyncio.run(engine_module.Engine.send(bot, SimpleNamespace(urn="t"), "hi", [], {}))
     assert [text.split(" · ")[1].removesuffix("*") for text in sent] == [
-        "home tunnel down", "sign-in needed", "on hold", "daily reply limit", "restarting",
+        "home tunnel down", "sign-in needed", "on hold", "daily reply limit",
+        "daily check limit", "daily open limit", "restarting",
         "accept failed", "reply not sent"]
     assert sent[0] == "🔴 *LinkedIn · home tunnel down* · start it so LinkedIn can open"
     assert re.fullmatch(r"🟡 \*LinkedIn · on hold\* · LinkedIn pushed back · back in 1[0-3]m",

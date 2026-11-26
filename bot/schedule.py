@@ -70,14 +70,16 @@ def settle(due: float, now: float, count: int, salt: str, hours: tuple[float, fl
 
 def next_inbox_check(last_check: float, watch_until: float, failed: bool, now: float, *,
                      poll_s: tuple[float, float], per_day: int,
-                     hours: tuple[float, float]) -> float:
+                     hours: tuple[float, float], capped: bool = False) -> float:
     """When to look at the inbox next.
 
     After a failed check: again in RETRY_S. While a chat goes on (the last check was before
     [watch_until], which is some time after its latest message): every [poll_s], so the
-    check after the end of the chat is the last one. Otherwise: the next of the day's
-    [per_day] planned moments."""
-    if failed:
+    check after the end of the chat is the last one. Otherwise, and once the day's check
+    limit is used up ([capped]): the next of the day's [per_day] planned moments."""
+    if capped:
+        due = planned_after(max(last_check, now - 2 * 86400), per_day, "inbox", hours)
+    elif failed:
         due = last_check + random.uniform(*RETRY_S)
     elif last_check < watch_until:
         due = last_check + random.uniform(*poll_s)

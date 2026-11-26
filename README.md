@@ -43,10 +43,12 @@ is slow on purpose, and each limit can be changed in `.env`:
 | `MAX_REPLIES_PER_DAY` | `40` | Then the rest wait until tomorrow, with an Enc Chat alert. |
 | `INVITE_ROUNDS` | `2` | Invitation rounds a day, planned like the inbox checks (with `8-24`: 9:12-14:48 and 17:12-22:48): every pending one is accepted. |
 | `ACCEPT_GAP_S` | `20-90` | Pause between two accepts in a round. |
-| `MAX_ACCEPTS_PER_DAY` | `0` | 0 accepts them all; a number caps the daily round. |
+| `MAX_ACCEPTS_PER_DAY` | `40` | The rest wait until tomorrow, with an Enc Chat alert; 0 accepts them all. |
+| `MAX_CHECKS_PER_DAY` | `80` | Inbox checks a day, follow-ups and retries included; past it only the planned checks run until tomorrow. 0: no limit. |
+| `MAX_OPENS_PER_DAY` | `24` | Times a day Chrome opens LinkedIn; past it LinkedIn stays closed until tomorrow. 0: no limit. |
 | `CATCHUP_GAP_S` | `90-300` | Pause between two conversations answered by `/catchup`. |
-| `BOT_PROXY` | empty | e.g. `socks5://172.17.0.1:1080`: every LinkedIn request goes through this proxy (a tunnel to your home connection, see below). When set, Chrome opens only while the proxy answers and never falls back to the server's own address; WebRTC is kept inside the proxy too. |
-| | | Chrome opens only for a check, an invitation round, a reply or a catch-up, and closes about a minute after (it stays open while a chat goes on, or when the next check is under 10 minutes away). No LinkedIn tab is connected at night or between checks, and the page is never reloaded on a timer. |
+| `BOT_PROXY` | empty | e.g. `socks5://172.17.0.1:1080`: every LinkedIn request goes through this proxy (a tunnel to your home connection, see below). When set, Chrome opens only while the proxy answers and never falls back to the server's own address; WebRTC is kept inside the proxy too. When empty, Chrome connects directly and ignores the desktop's system proxy (a Tor toggle would show LinkedIn an exit node). |
+| | | Chrome opens only for a check, an invitation round, a reply or a catch-up, and closes about a minute after (it stays open while a chat goes on, or when the next check is under 10 minutes away). No LinkedIn tab is connected at night or between checks, and the page is never reloaded on a timer. A start within an hour of other starts waits before it opens LinkedIn (1 minute, doubling to 30), so a crash loop cannot load LinkedIn every few seconds; laptop sleep is not treated as a stall. |
 
 Older conversations (started before the bot) are never answered on their own. Send
 `/catchup 3` in Enc Chat to answer every unanswered one-to-one message from the last 3 days

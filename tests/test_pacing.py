@@ -37,7 +37,9 @@ def test_defaults_are_slow():
     assert CONFIG.reply_delay_s[0] >= 20
     assert CONFIG.accept_gap_s[0] >= 20
     assert CONFIG.max_replies_per_day <= 40
-    assert CONFIG.max_accepts_per_day == 0
+    assert 0 < CONFIG.max_accepts_per_day <= 40
+    assert 0 < CONFIG.max_checks_per_day <= 80  # past it only the planned checks run
+    assert 0 < CONFIG.max_opens_per_day <= 24
 
 
 def _invite(urn, sent_at):

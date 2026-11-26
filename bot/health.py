@@ -92,6 +92,19 @@ def alert(state: str, detail: str = "", icon: str = "🟡") -> None:
         )
 
 
+SLEPT_S = 60.0
+
+
+def woke_at(wall: float, clock: float, wall_now: float, clock_now: float, woke: float) -> float:
+    """When the laptop last woke from sleep: now, if the wall clock moved more than SLEPT_S
+    past the monotonic clock (which stands still in sleep) since [wall]/[clock], else [woke].
+    A laptop that slept 15 minutes is not a stuck event loop (2026-11-26 20:22)."""
+    if (wall_now - wall) - (clock_now - clock) > SLEPT_S:
+        log.info("The machine slept for %ds", (wall_now - wall) - (clock_now - clock))
+        return wall_now
+    return woke
+
+
 def start_watchdog(get_status_time, limit_s: float = STALE_STATUS_S * 2) -> None:
     """Kill the process if the event loop stops updating the status, so the supervisor restarts it.
 
@@ -99,9 +112,12 @@ def start_watchdog(get_status_time, limit_s: float = STALE_STATUS_S * 2) -> None
     """
 
     def watch() -> None:
+        woke = 0.0
         while True:
+            wall, clock = time.time(), time.monotonic()
             time.sleep(30)
-            stuck = time.time() - get_status_time()
+            woke = woke_at(wall, clock, time.time(), time.monotonic(), woke)
+            stuck = time.time() - max(get_status_time(), woke)
             if stuck > limit_s:
                 log.error("Event loop stuck for %ds, exiting for a restart", stuck)
                 logging.shutdown()

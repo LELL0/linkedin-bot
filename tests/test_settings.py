@@ -172,6 +172,7 @@ def test_new_interval_cuts_a_long_wait_short(monkeypatch):
     engine = engine_module.Engine.__new__(engine_module.Engine)
     engine.last_check, engine.check_failed = time.time() + 0.5, False
     engine.watch_until = time.time() + 7200
+    engine.at_limit = lambda kind, limit: False
     monkeypatch.setattr(settings.CONFIG, "active_hours", (0.0, 24.0))
 
     async def run():

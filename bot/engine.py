@@ -2,6 +2,7 @@
 while it goes on, and answer each thread once it goes quiet."""
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -30,6 +31,29 @@ HEARTBEAT_S = 60
 KEEP_OPEN_S = 600
 # Answers that mean "slow down" rather than "signed out".
 PUSHBACK = re.compile(r"HTTP (429|999|5\d\d)\b")
+# A start this soon after other starts waits before Chrome opens LinkedIn: 1 minute after one
+# start in the last hour, doubling with each further one up to 30 minutes. A crash or restart
+# loop would otherwise load LinkedIn every few seconds.
+RESTART_WINDOW_S = 3600.0
+RESTART_PAUSE_S = (60.0, 1800.0)
+# Laptop sleep: the wall clock moved this much more than the event loop's clock.
+SLEPT_S = 60.0
+# The daily limits, as the alert names them, and what happens until the next day.
+LIMITS = {
+    "replies": ("reply", "the rest go tomorrow"),
+    "accepts": ("accept", "the rest go tomorrow"),
+    "checks": ("check", "planned ones only now"),
+    "opens": ("open", "closed until tomorrow"),
+}
+
+
+def restart_delay(starts: list[float], now: float) -> float:
+    """How long a start waits before it opens LinkedIn, given the earlier starts."""
+    recent = [s for s in starts if 0 <= now - s < RESTART_WINDOW_S]
+    if not recent:
+        return 0.0
+    first, longest = RESTART_PAUSE_S
+    return min(first * 2 ** (len(recent) - 1), longest)
 
 
 def in_active_hours(now: datetime | None = None) -> bool:
@@ -102,6 +126,7 @@ class Engine:
         )
 
     async def start_and_poll(self) -> None:
+        await self.pace_restarts()
         await self.open_chrome()
         await self.api.load_self()
         self.scope = Scope(CONFIG.reply_scope, self.store.watermark(), self.api.self_id)
@@ -109,6 +134,22 @@ class Engine:
         log.info("Running. scope=%s dry_run=%s", self.scope.mode, CONFIG.dry_run)
         self.started = True
         await self.poll_loop()
+
+    async def pace_restarts(self) -> None:
+        """Wait before the first LinkedIn request when the bot started several times within
+        the hour (restart_delay). The starts are kept in the store across restarts."""
+        try:
+            starts = [float(s) for s in json.loads(self.store.get_meta("starts", "[]"))]
+        except (TypeError, ValueError):
+            starts = []
+        now = time.time()
+        wait = restart_delay(starts, now)
+        recent = [s for s in starts if 0 <= now - s < RESTART_WINDOW_S][-9:]
+        self.store.set_meta("starts", json.dumps([*recent, now + wait]))
+        if wait:
+            log.warning("Started %d times within the hour: waiting %ds before opening LinkedIn",
+                        len(recent) + 1, wait)
+            await self.idle("starting", wait)
 
     async def idle(self, state: str, seconds: float) -> None:
         """Wait without touching LinkedIn, still writing the status for the watchdog."""
@@ -123,8 +164,13 @@ class Engine:
         """Open Chrome on LinkedIn: only within active hours, and only through the proxy
         when one is set. A person's laptop is not on LinkedIn at 3 a.m., nor from a
         datacenter."""
-        while not in_active_hours():
-            await self.idle("asleep", 60)
+        while True:
+            if not in_active_hours():
+                await self.idle("asleep", 60)
+            elif CONFIG.max_opens_per_day and self.at_limit("opens", CONFIG.max_opens_per_day):
+                await self.idle("resting", 600)  # Then the night, then a new day's count.
+            else:
+                break
         warned = False
         while CONFIG.proxy and (problem := await asyncio.to_thread(proxy_problem, CONFIG.proxy)):
             if not warned:
@@ -137,6 +183,7 @@ class Engine:
             await self.idle("no_proxy", 60)
         if warned:
             log.info("Proxy answers again, opening LinkedIn")
+        self.count("opens")
         await self.session.start()
         await self.wait_for_session()
 
@@ -282,6 +329,7 @@ class Engine:
                     await asyncio.sleep(gap)
                 self.last_check = time.time()
                 self.store.set_meta("last_check_at", repr(self.last_check))
+                self.count("checks")
                 try:
                     await self.check_threads()
                     self.last_ok = self.checked_at = time.time()
@@ -294,9 +342,12 @@ class Engine:
                 self.busy -= 1
 
     def plan_check(self) -> float:
+        capped = bool(CONFIG.max_checks_per_day) and self.at_limit(
+            "checks", CONFIG.max_checks_per_day)
         self.next_check = schedule.next_inbox_check(
             self.last_check, self.watch_until, self.check_failed, time.time(),
             poll_s=CONFIG.poll_s, per_day=CONFIG.inbox_checks, hours=CONFIG.active_hours,
+            capped=capped,
         )
         return self.next_check
 
@@ -335,7 +386,8 @@ class Engine:
             while (left := due - time.time()) > 0:
                 self.invites_replan.clear()
                 try:
-                    await asyncio.wait_for(self.invites_replan.wait(), left)
+                    # A minute at most, so laptop sleep does not push the round back.
+                    await asyncio.wait_for(self.invites_replan.wait(), min(left, 60.0))
                     due = self.plan_invites()
                 except TimeoutError:
                     pass
@@ -468,7 +520,14 @@ class Engine:
 
     async def maintenance_loop(self) -> None:
         while True:
+            wall, clock = time.time(), time.monotonic()
             await asyncio.sleep(HEARTBEAT_S)
+            slept = (time.time() - wall) - (time.monotonic() - clock)
+            if slept > SLEPT_S:
+                # The laptop slept: no check could run, so the gap is not a stall. The next
+                # due check runs once, now, never one per missed slot.
+                log.info("Woke up after %s asleep", duration(slept))
+                self.last_ok = max(self.last_ok, time.time())
             log.info(
                 "alive: accepted=%d replies=%d realtime_events=%d topics=%s workers=%d last_ok=%ds ago",
                 self.accepted,
@@ -492,22 +551,26 @@ class Engine:
             # No page reloads: Chrome opens fresh when checks start again, and reloads all
             # day would show LinkedIn a tab nobody looks at.
 
+    @staticmethod
+    def day() -> date:
+        return datetime.fromtimestamp(time.time()).date()
+
     def today(self, kind: str) -> int:
-        value = self.store.get_meta(f"{kind}:{date.today().isoformat()}", "0")
+        value = self.store.get_meta(f"{kind}:{self.day().isoformat()}", "0")
         return int(value) if value.isdigit() else 0
 
     def count(self, kind: str) -> None:
-        self.store.set_meta(f"{kind}:{date.today().isoformat()}", str(self.today(kind) + 1))
+        self.store.set_meta(f"{kind}:{self.day().isoformat()}", str(self.today(kind) + 1))
 
     def at_limit(self, kind: str, limit: int) -> bool:
-        """Whether today's limit for accepts or replies is used up. Tells the owner once."""
+        """Whether today's limit (LIMITS) is used up. Tells the owner once a day."""
         if self.today(kind) < limit:
             return False
-        key = f"{kind}:{date.today().isoformat()}"
+        key = f"{kind}:{self.day().isoformat()}"
         if key not in self.capped:
             self.capped.add(key)
-            noun = {"replies": "reply", "accepts": "accept"}.get(kind, kind)
-            alert(f"daily {noun} limit", f"{limit} today · the rest go tomorrow", "🟡")
+            noun, then = LIMITS.get(kind, (kind, "the rest go tomorrow"))
+            alert(f"daily {noun} limit", f"{limit} today · {then}", "🟡")
         return True
 
     async def check_invitations(self) -> None:

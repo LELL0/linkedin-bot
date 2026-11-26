@@ -5,6 +5,7 @@ import asyncio
 import dataclasses
 import socket
 import time
+from types import SimpleNamespace
 
 from bot import engine as engine_module
 from bot import session as session_module
@@ -40,6 +41,10 @@ def make_bot(monkeypatch, **config):
     bot.busy, bot.watch_until, bot.paused, bot.backoff_until = 0, 0.0, False, 0.0
     bot.next_check = bot.next_invites = time.time() + 3 * 3600
     bot.opening = asyncio.Lock()
+    meta: dict[str, str] = {}
+    bot.store = SimpleNamespace(get_meta=lambda key, default="": meta.get(key, default),
+                                set_meta=meta.__setitem__)
+    bot.capped = set()
 
     async def signed_in():
         bot.state = "running"
@@ -213,3 +218,8 @@ def test_own_lock_is_left_alone(tmp_path):
 
 def test_no_lock_is_fine(tmp_path):
     assert not session_module.clear_stale_lock(tmp_path)
+
+
+def test_without_a_proxy_chrome_ignores_the_system_proxy():
+    assert "--no-proxy-server" in session_module.browser_args("", chromium=False)
+    assert "--no-proxy-server" not in session_module.browser_args("socks5://h:1", chromium=False)

@@ -93,6 +93,10 @@ def browser_args(proxy: str, chromium: bool) -> list[str]:
     if proxy:
         # WebRTC sends UDP around a proxy, which would show the server's own address.
         args.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+    else:
+        # Without BOT_PROXY, connect directly: a desktop's system proxy (a Tor toggle on the
+        # laptop) would show LinkedIn an exit node, a sure checkpoint.
+        args.append("--no-proxy-server")
     return args
 
 

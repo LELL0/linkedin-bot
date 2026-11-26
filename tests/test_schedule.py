@@ -392,3 +392,86 @@ def test_a_restart_neither_repeats_nor_skips_a_check(life):
     life.run(at(date(2026, 1, 6), 6) - rec.clock())  # ... and on again: the same day.
     assert per_day(rec.checks) == {date(2026, 1, 5): 3}
     assert before == sum(t < at(date(2026, 1, 5), 14) for t in rec.checks)
+
+
+# Daily caps and restarts (2026-11-27): no chat, bug or restart loop makes the account
+# busier than a person who keeps LinkedIn open on and off all day.
+
+
+def test_capped_check_goes_back_to_the_plan():
+    now = at(date(2026, 1, 5), 12)
+    planned = schedule.planned_after(now, 3, "inbox", HOURS)
+    for failed, watch in ((True, 0.0), (False, now + 3600)):
+        due = schedule.next_inbox_check(now, watch, failed, now, poll_s=POLL, per_day=3,
+                                        hours=HOURS, capped=True)
+        assert due == planned
+
+
+def test_a_chat_all_day_stays_under_the_daily_check_limit(life, monkeypatch):
+    rec = life.rec
+    monkeypatch.setattr(engine_module.CONFIG, "max_checks_per_day", 40)
+    api_holder = {}
+
+    async def chatty():
+        """Writes again 4 minutes after each reply, from 8:30 until midnight."""
+        api = api_holder["api"]
+        await asyncio.sleep(at(date(2026, 1, 5), 8.5) - rec.clock())
+        while rec.clock() < at(date(2026, 1, 6), 0):
+            api.add("chat", text="and?", at=int(rec.clock() * 1000))
+            answered = len(api.sent)
+            while len(api.sent) == answered and rec.clock() < at(date(2026, 1, 6), 0):
+                await asyncio.sleep(30)
+            await asyncio.sleep(240)
+
+    bot = life.build()
+    api_holder["api"] = bot.api
+    life.run(2 * DAY, bot, chatty())
+    counts = per_day(rec.checks)
+    assert counts[date(2026, 1, 5)] <= 40 + 3  # The limit, then only the planned checks.
+    assert counts[date(2026, 1, 6)] <= 40 + 3
+    assert per_day(bot.api.sent_at)[date(2026, 1, 5)] <= 40  # MAX_REPLIES_PER_DAY
+    reads = [t for t, call, _ in rec.calls if call in ("list_threads", "list_messages")]
+    assert max(per_day(reads).values()) < 400
+    for moment, call, chrome in rec.calls:
+        assert chrome and schedule.within(HOURS, datetime.fromtimestamp(moment)), call
+
+
+def test_linkedin_opens_at_most_the_daily_limit(life, monkeypatch):
+    rec = life.rec
+    monkeypatch.setattr(engine_module.CONFIG, "max_opens_per_day", 2)
+    life.run(3 * DAY)
+    assert max(per_day(rec.opened).values()) <= 2
+    for opened in rec.opened:  # Never opened at night, also after waiting out the limit.
+        assert schedule.within(HOURS, datetime.fromtimestamp(opened))
+
+
+def test_restart_delay_doubles_within_the_hour():
+    assert engine_module.restart_delay([], 1000.0) == 0
+    assert engine_module.restart_delay([1000.0 - 3700], 1000.0) == 0  # Over an hour ago.
+    assert engine_module.restart_delay([990.0], 1000.0) == 60
+    assert engine_module.restart_delay([980.0, 990.0], 1000.0) == 120
+    assert engine_module.restart_delay([float(x) for x in range(990, 1000)], 1000.0) == 1800
+
+
+def test_a_restart_loop_waits_longer_each_time(tmp_path, monkeypatch):
+    clock = [at(date(2026, 1, 5), 10)]
+    monkeypatch.setattr(engine_module, "time",
+                        SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0]))
+    store = Store(tmp_path / "state.db")
+    waits = []
+
+    async def idle(state, seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    for _ in range(7):  # Crashes 5 seconds after each start.
+        bot = Engine.__new__(Engine)
+        bot.store, bot.idle = store, idle
+        asyncio.run(bot.pace_restarts())
+        clock[0] += 5
+    assert waits == [60, 120, 240, 480, 960, 1800]
+    clock[0] += 2 * 3600  # Ran fine for two hours, then one restart: no wait.
+    bot = Engine.__new__(Engine)
+    bot.store, bot.idle = store, idle
+    asyncio.run(bot.pace_restarts())
+    assert len(waits) == 6

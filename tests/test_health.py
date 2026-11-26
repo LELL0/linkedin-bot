@@ -66,3 +66,10 @@ def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
 def test_healthcheck_uses_the_limit_the_bot_wrote():
     assert health.problem(status(last_ok=NOW - 5000, stale_poll_s=6000), NOW) is None
     assert "no successful" in health.problem(status(last_ok=NOW - 5000, stale_poll_s=4000), NOW)
+
+
+def test_laptop_sleep_is_not_a_stuck_loop():
+    # 30 s of loop time, 15 minutes on the wall clock: the machine slept.
+    assert health.woke_at(1000.0, 50.0, 1900.0, 80.0, 0.0) == 1900.0
+    # Both clocks moved together: no sleep, the last wake is kept.
+    assert health.woke_at(1000.0, 50.0, 1030.0, 80.0, 500.0) == 500.0
