@@ -50,12 +50,18 @@ class Config:  # Not frozen: bot.settings changes some fields from Enc Chat.
     # Wait for this much silence before answering, so a burst gets one reply.
     debounce_quiet_s: float = 3.0
     debounce_max_s: float = 9.0
-    # LinkedIn watches request rates per account, so the bot is slow on purpose. The inbox
-    # is checked every 5-15 minutes (random), and realtime events do not make it sooner.
-    poll_s: tuple[float, float] = _range("POLL_S", "300-900")
-    # Invitations are handled once a day, at a random time in this window (local hours),
-    # all at once with a short gap between accepts.
-    invite_window: tuple[float, float] = _range("INVITE_WINDOW", "9-11")
+    # LinkedIn watches request rates per account, so the bot is slow on purpose, and looks
+    # like a person who opens LinkedIn a few times a day. The inbox is checked this many
+    # times a day, at random moments spread over the active hours (bot/schedule.py), with
+    # Chrome closed in between. Realtime events do not make it sooner.
+    inbox_checks: int = int(os.environ.get("INBOX_CHECKS", "3"))
+    # Once a message is seen, the inbox is checked every poll_s (random) until watch_s has
+    # passed since the chat's latest message or reply, then back to inbox_checks a day.
+    poll_s: tuple[float, float] = _range("POLL_S", "120-600")
+    watch_s: float = float(os.environ.get("WATCH_S", "7200"))
+    # Invitations are handled this many times a day, at random moments spread over the
+    # active hours, every pending one with a short gap between accepts.
+    invite_rounds: int = int(os.environ.get("INVITE_ROUNDS", "2"))
     accept_gap_s: tuple[float, float] = _range("ACCEPT_GAP_S", "20-90")
     # Never check the inbox more often than this.
     min_check_gap_s: float = float(os.environ.get("MIN_CHECK_GAP_S", "60"))
@@ -78,8 +84,5 @@ class Config:  # Not frozen: bot.settings changes some fields from Enc Chat.
     # (2026-11-08 and 11-09). When set, Chrome only opens once the proxy answers, and it
     # never falls back to the server's own address.
     proxy: str = os.environ.get("BOT_PROXY", "")
-    # Close Chrome outside active_hours, so no LinkedIn tab stays connected all night,
-    # and open it again at a random time up to this many minutes after they start.
-    wake_jitter_s: tuple[float, float] = _range("WAKE_JITTER_S", "0-2400")
 
 CONFIG = Config()

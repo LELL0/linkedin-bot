@@ -10,6 +10,7 @@ import time
 
 from . import enc
 from .config import CONFIG
+from .schedule import RETRY_S
 
 log = logging.getLogger(__name__)
 
@@ -17,10 +18,11 @@ STALE_STATUS_S = 180  # The bot rewrites the file every minute.
 
 
 def stale_poll_s() -> float:
-    """No successful LinkedIn check for this long means it is stuck. The bot waits up to
-    CONFIG.poll_s between checks on purpose (changeable from Enc Chat), so allow the longest
-    wait plus a check's time."""
-    return CONFIG.poll_s[1] + CONFIG.min_check_gap_s + 300
+    """No successful LinkedIn check for this long means it is stuck. Hours between planned
+    checks do not count: the bot keeps last_ok fresh while it waits on purpose after a good
+    check. What counts is the wait after a failed check (RETRY_S) or during a chat
+    (CONFIG.poll_s, changeable from Enc Chat), so allow the longest plus a check's time."""
+    return max(CONFIG.poll_s[1], RETRY_S[1]) + CONFIG.min_check_gap_s + 300
 
 
 ALERT_REPEAT_S = 3600

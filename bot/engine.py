@@ -1,4 +1,5 @@
-"""Main loop: watch for invitations and messages, and answer each thread once it goes quiet."""
+"""Main loop: look for invitations and messages a few times a day, follow a chat closely
+while it goes on, and answer each thread once it goes quiet."""
 
 import asyncio
 import logging
@@ -6,10 +7,9 @@ import os
 import random
 import re
 import time
-import zlib
 from datetime import date, datetime
 
-from . import metrics, settings
+from . import metrics, schedule, settings
 from .brain import Brain, render_message
 from .config import CONFIG
 from .guard import Scope, in_scope, predates_start, unanswered
@@ -24,34 +24,25 @@ log = logging.getLogger(__name__)
 
 MAX_REGENERATIONS = 2
 SEND_ATTEMPTS = 3
-PAGE_REFRESH_S = 45 * 60
 HEARTBEAT_S = 60
+# Chrome stays open when the next check or invitation round is this close, rather than
+# closing and opening again minutes later.
+KEEP_OPEN_S = 600
 # Answers that mean "slow down" rather than "signed out".
 PUSHBACK = re.compile(r"HTTP (429|999|5\d\d)\b")
 
 
 def in_active_hours(now: datetime | None = None) -> bool:
     """Whether the bot may work now. A range like 8-2 runs past midnight."""
-    start, end = CONFIG.active_hours
-    now = now or datetime.now()
-    hour = now.hour + now.minute / 60
-    if start <= end:
-        return start <= hour < end
-    return hour >= start or hour < end
+    return schedule.within(CONFIG.active_hours, now or datetime.now())
 
 
-def invite_time(day: date) -> float:
-    """Today's time for handling invitations, as a local hour. Random in
-    CONFIG.invite_window, and the same all day so a restart does not move it."""
-    low, high = CONFIG.invite_window
-    return low + (high - low) * (zlib.crc32(day.isoformat().encode()) % 1000) / 999
-
-
-def invites_due(done_on: str, now: datetime | None = None) -> bool:
-    """Whether today's invitation round should run now."""
-    now = now or datetime.now()
-    return done_on != now.date().isoformat() and \
-        now.hour + now.minute / 60 >= invite_time(now.date())
+def meta_time(store: Store, key: str) -> float:
+    """A time kept in the store's meta (written with repr, so exact), or 0 when there is none."""
+    try:
+        return float(store.get_meta(key, "0") or 0)
+    except ValueError:
+        return 0.0
 
 
 class Engine:
@@ -61,21 +52,32 @@ class Engine:
         self.store = Store(CONFIG.db_path)
         for name in settings.load(self.store):
             log.warning("Stored setting %s is not valid any more, back to its default", name)
-        self.poll_now = asyncio.Event()  # Set when the poll interval changes.
+        self.poll_now = asyncio.Event()  # Set when a chat starts or a timing setting changes.
+        self.invites_replan = asyncio.Event()  # Set when the invitation settings change.
         self.brain: Brain | None = None
         self.scope: Scope | None = None
         self.workers: dict[str, asyncio.Task] = {}
         self.recheck: set[str] = set()
         self.seen_activity: dict[str, int] = {}
+        # Fine as of this time: the last good check, or a wait on purpose after one. The
+        # health check and the watchdog judge stalls on it.
         self.last_ok = time.time()
+        self.checked_at = 0.0  # Last inbox check that worked.
         self.trigger = "poll"  # What started the current check: poll or realtime.
         self.replies_sent = 0
         self.accepted = 0
         self.state = "starting"
         self.recovering = asyncio.Lock()
+        self.opening = asyncio.Lock()
         self.backoff_until = 0.0  # No LinkedIn request before this time.
         self.failures = 0  # Push-backs in a row; each one doubles the wait.
-        self.last_check = 0.0
+        # Kept across restarts, so a restart neither repeats a check nor forgets a chat.
+        self.last_check = meta_time(self.store, "last_check_at")
+        self.last_invites = meta_time(self.store, "invites_at")
+        self.watch_until = meta_time(self.store, "watch_until")  # Following a chat until then.
+        self.check_failed = False
+        self.next_check = self.next_invites = 0.0
+        self.busy = 0  # Checks and invitation rounds going on now; Chrome stays open for them.
         self.capped: set[str] = set()
         # /catchup: thread urn -> answer messages after this time (ms), whatever the scope.
         self.catchup_since: dict[str, int] = {}
@@ -100,7 +102,7 @@ class Engine:
         )
 
     async def start_and_poll(self) -> None:
-        await self.wake()
+        await self.open_chrome()
         await self.api.load_self()
         self.scope = Scope(CONFIG.reply_scope, self.store.watermark(), self.api.self_id)
         self.brain = Brain(self.api.first_name, self.api.headline)
@@ -117,14 +119,12 @@ class Engine:
             await asyncio.sleep(min(30.0, left))
         self.write_status()
 
-    async def wake(self, jitter: bool = False) -> None:
-        """Open Chrome on LinkedIn: only within active hours, a random while after they
-        start (jitter), and only through the proxy when one is set. A person's laptop is
-        not on LinkedIn at 3 a.m., nor from a datacenter."""
+    async def wake(self) -> None:
+        """Open Chrome on LinkedIn: only within active hours, and only through the proxy
+        when one is set. A person's laptop is not on LinkedIn at 3 a.m., nor from a
+        datacenter."""
         while not in_active_hours():
             await self.idle("asleep", 60)
-        if jitter:
-            await self.idle("asleep", random.uniform(*CONFIG.wake_jitter_s))
         warned = False
         while CONFIG.proxy and (problem := await asyncio.to_thread(proxy_problem, CONFIG.proxy)):
             if not warned:
@@ -140,25 +140,56 @@ class Engine:
         await self.session.start()
         await self.wait_for_session()
 
-    async def browser_loop(self) -> None:
-        """Close Chrome for the night and open it again in the morning."""
+    async def open_chrome(self) -> None:
+        """Open Chrome unless it is open; the loops share one window."""
+        async with self.opening:
+            if not self.session.open:
+                await self.wake()
+
+    async def ready(self) -> None:
+        """Hold until LinkedIn may be called: within active hours, not paused, no back-off,
+        and Chrome open and signed in. Chrome opens here, only when a check, an invitation
+        round or a catch-up needs it."""
         while True:
-            await asyncio.sleep(60)
-            if not self.started:
-                continue  # start_and_poll opens Chrome the first time.
-            busy = self.workers or (self.catchup_task and not self.catchup_task.done())
-            if self.state == "running" and self.session.open and not in_active_hours() and not busy:
-                log.info("Outside active hours %s: closing Chrome until then", CONFIG.active_hours)
-                self.state = "asleep"
-                self.write_status()
-                await self.session.stop()
-            elif self.state == "asleep" and not self.session.open and in_active_hours():
+            if not self.session.open and in_active_hours() and not self.paused \
+                    and time.time() >= self.backoff_until:
                 try:
-                    await self.wake(jitter=True)
+                    await self.open_chrome()
                 except Exception:
                     log.exception("Could not open Chrome, trying again in 5 minutes")
                     await self.session.stop()
-                    await self.idle("asleep", 300)
+                    await self.idle("resting", 300)
+            if await self.may_call():
+                return
+
+    def needs_chrome(self) -> bool:
+        """Whether Chrome should stay open: a check, round, reply or catch-up is going on,
+        a chat is being followed, or the next check is minutes away. At night only a
+        reply or a check already under way keeps it."""
+        busy = self.busy or self.workers or (self.catchup_task and not self.catchup_task.done())
+        if busy or not in_active_hours():
+            return bool(busy)
+        now = time.time()
+        soon = any(0 <= due - now <= KEEP_OPEN_S for due in (self.next_check, self.next_invites))
+        return now < self.watch_until or soon
+
+    async def browser_loop(self) -> None:
+        """Close Chrome when nothing needs it: between checks, and for the night. A person
+        does not keep LinkedIn open all day to read messages three times."""
+        while True:
+            await asyncio.sleep(60)
+            if not self.started or not self.session.open or self.state != "running":
+                continue  # start_and_poll opens Chrome the first time.
+            if self.needs_chrome():
+                continue
+            if in_active_hours():
+                log.info("Closing Chrome until the next check")
+                self.state = "resting"
+            else:
+                log.info("Outside active hours %s: closing Chrome until then", CONFIG.active_hours)
+                self.state = "asleep"
+            self.write_status()
+            await self.session.stop()
 
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
@@ -242,43 +273,93 @@ class Engine:
 
     async def poll_loop(self) -> None:
         while True:
-            if not await self.may_call():
-                continue
-            gap = CONFIG.min_check_gap_s - (time.time() - self.last_check)
-            if gap > 0:
-                await asyncio.sleep(gap)
-            self.last_check = time.time()
-            try:
-                await self.check_threads()
-                self.last_ok = time.time()
-                self.failures = 0
-            except Exception as error:
-                await self.on_error(error, "inbox check")
             await self.sleep_until_next_poll()
-
-    async def invite_loop(self) -> None:
-        while True:
-            if not await self.may_call():
-                continue
-            if invites_due(self.store.get_meta("invites_done")):
+            await self.ready()
+            self.busy += 1
+            try:
+                gap = CONFIG.min_check_gap_s - (time.time() - self.last_check)
+                if gap > 0:
+                    await asyncio.sleep(gap)
+                self.last_check = time.time()
+                self.store.set_meta("last_check_at", repr(self.last_check))
                 try:
-                    await self.check_invitations()
-                    self.store.set_meta("invites_done", date.today().isoformat())
+                    await self.check_threads()
+                    self.last_ok = self.checked_at = time.time()
+                    self.failures = 0
+                    self.check_failed = False
                 except Exception as error:
-                    await self.on_error(error, "invitation check")
-            await asyncio.sleep(300)
+                    self.check_failed = True
+                    await self.on_error(error, "inbox check")
+            finally:
+                self.busy -= 1
+
+    def plan_check(self) -> float:
+        self.next_check = schedule.next_inbox_check(
+            self.last_check, self.watch_until, self.check_failed, time.time(),
+            poll_s=CONFIG.poll_s, per_day=CONFIG.inbox_checks, hours=CONFIG.active_hours,
+        )
+        return self.next_check
 
     async def sleep_until_next_poll(self) -> None:
-        """Wait a random time from CONFIG.poll_s. When the interval changes from Enc Chat, the
-        wait is drawn again from the new interval, counted from the last check."""
-        deadline = time.time() + random.uniform(*CONFIG.poll_s)
-        while (left := deadline - time.time()) > 0:
+        """Wait for the next inbox check (schedule.next_inbox_check). When a chat starts or a
+        timing setting changes, the time is worked out again from the last check."""
+        due = self.plan_check()
+        while (left := due - time.time()) > 0:
             self.poll_now.clear()
             try:
-                await asyncio.wait_for(self.poll_now.wait(), left)
+                await asyncio.wait_for(self.poll_now.wait(), min(left, 60.0))
+                due = self.plan_check()
             except TimeoutError:
-                return
-            deadline = self.last_check + random.uniform(*CONFIG.poll_s)
+                pass
+            if not self.check_failed:
+                self.last_ok = time.time()  # Waiting on purpose after a good check: no stall.
+
+    def watch(self, at: float) -> None:
+        """Follow a chat: check every CONFIG.poll_s until CONFIG.watch_s after [at], its
+        latest message or reply. A later one moves the end on."""
+        until = at + CONFIG.watch_s
+        if until <= self.watch_until:
+            return
+        if self.watch_until <= time.time():
+            log.info("A chat is going on: checking every %s until %s after it goes quiet",
+                     settings.show("poll"), settings.show("watch"))
+        self.watch_until = until
+        self.store.set_meta("watch_until", repr(until))
+        self.poll_now.set()
+
+    async def invite_loop(self) -> None:
+        while not self.started:
+            await asyncio.sleep(5)
+        while True:
+            due = self.plan_invites()
+            while (left := due - time.time()) > 0:
+                self.invites_replan.clear()
+                try:
+                    await asyncio.wait_for(self.invites_replan.wait(), left)
+                    due = self.plan_invites()
+                except TimeoutError:
+                    pass
+            await self.ready()
+            failed = False
+            self.busy += 1
+            try:
+                await self.check_invitations()
+                self.last_invites = time.time()
+                self.store.set_meta("invites_at", repr(self.last_invites))
+            except Exception as error:
+                failed = True
+                await self.on_error(error, "invitation check")
+            finally:
+                self.busy -= 1
+            if failed:  # The round is still due: try again later, Chrome may close meanwhile.
+                await asyncio.sleep(random.uniform(*schedule.RETRY_S))
+
+    def plan_invites(self) -> float:
+        self.next_invites = schedule.next_invite_round(
+            self.last_invites, time.time(), per_day=CONFIG.invite_rounds,
+            hours=CONFIG.active_hours,
+        )
+        return self.next_invites
 
     def change_setting(self, name: str, value: object | None) -> None:
         """Set (or with None, reset) a setting from Enc Chat and keep it across restarts."""
@@ -289,8 +370,10 @@ class Engine:
         log.info("Setting %s = %s", name, settings.show(name))
         if name == "scope" and self.scope is not None:
             self.scope = Scope(CONFIG.reply_scope, self.scope.watermark, self.scope.self_id)
-        if name in ("poll", "check_gap"):
+        if name in ("poll", "check_gap", "checks", "watch", "active_hours"):
             self.poll_now.set()
+        if name in ("invites", "active_hours"):
+            self.invites_replan.set()
         self.write_status()
 
     async def recover(self) -> None:
@@ -345,8 +428,7 @@ class Engine:
         long pause between them, within active hours, daily limits and back-offs."""
         self.catchup_progress = None
         try:
-            while not await self.may_call():
-                pass
+            await self.ready()
             since = int((time.time() - days * 86400) * 1000)
             threads = await self.unanswered_since(days)
             if not threads:
@@ -361,8 +443,7 @@ class Engine:
             for number, thread in enumerate(threads):
                 if number:
                     await asyncio.sleep(random.uniform(low, high))
-                while not await self.may_call():
-                    pass
+                await self.ready()
                 if self.at_limit("replies", CONFIG.max_replies_per_day):
                     await report(catchup_limit_text(answered, len(threads) - number))
                     return
@@ -386,7 +467,6 @@ class Engine:
         os._exit(1)  # sys.exit inside a callback would not stop the loop.
 
     async def maintenance_loop(self) -> None:
-        last_refresh = time.time()
         while True:
             await asyncio.sleep(HEARTBEAT_S)
             log.info(
@@ -409,10 +489,8 @@ class Engine:
                 alert("restarting", f"no inbox check for {duration(stalled)}", "⏳")
                 logging.shutdown()
                 os._exit(1)  # sys.exit inside a task may not stop the loop.
-            idle = not self.workers and in_active_hours() and self.session.open
-            if idle and self.state == "running" and time.time() >= self.backoff_until and time.time() - last_refresh > PAGE_REFRESH_S:
-                await self.session.page.reload(wait_until="domcontentloaded")
-                last_refresh = time.time()
+            # No page reloads: Chrome opens fresh when checks start again, and reloads all
+            # day would show LinkedIn a tab nobody looks at.
 
     def today(self, kind: str) -> int:
         value = self.store.get_meta(f"{kind}:{date.today().isoformat()}", "0")
@@ -556,6 +634,7 @@ class Engine:
         history, pending = await self.pending_for(thread)
         if not pending:
             return
+        self.watch(pending[-1].delivered_at / 1000)  # A chat may be going on: follow it.
         await self.api.mark_read(thread.urn)
         await self.api.show_typing(thread.urn)
 
@@ -582,6 +661,7 @@ class Engine:
         if CONFIG.dry_run:
             log.info("DRY RUN: would send %d chars: %s", len(reply), trace)
             self.store.mark_answered([m.urn for m in pending])
+            self.watch(time.time())
             return
         # Checked again here, and counted before sending, because other threads may have
         # replied while this one was waiting and drafting.
@@ -596,6 +676,7 @@ class Engine:
                 self.store.mark_answered([m.urn for m in pending])
                 self.replies_sent += 1
                 now = time.time()
+                self.watch(now)  # The answer may come soon: keep checking every few minutes.
                 trace |= {
                     "total_s": round(now - pending[0].delivered_at / 1000, 2),
                     "since_last_s": round(now - pending[-1].delivered_at / 1000, 2),

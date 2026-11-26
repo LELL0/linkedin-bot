@@ -185,7 +185,8 @@ def control(monkeypatch):
     """A control whose send() records the text instead of reaching an agent."""
     monkeypatch.setenv("ENC_BOT_SECRET", "s")
     monkeypatch.setenv("ENC_OWNER", OWNER)
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=1, replies_sent=2, store=MemoryStore())
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     engine.set_replies_feed = lambda on: setattr(engine, "replies_feed", on)
@@ -219,14 +220,19 @@ def test_pause_resume_and_replies_toggle(monkeypatch):
     asyncio.run(ec.handle("/status"))
     lines = sent[-1].split("\n")  # Enc Chat marks, never HTML
     assert lines[0] == "🟢 *LinkedIn · running* · no check yet"
-    assert lines[1].startswith("*Inbox* every ")
+    assert lines[1] == "*Inbox* 3 a day · hours 8-24h"
     assert lines[2] == "*Since start* 1 accept · 2 replies"
     assert lines[3] == "*In this chat* replies off · log off"
     assert "<b>" not in sent[-1]
     assert_style(sent[-1], 4)
-    engine.last_ok = time.time() - 300
+    engine.checked_at = time.time() - 300
     asyncio.run(ec.handle("/status"))
     assert sent[-1].startswith("🟢 *LinkedIn · running* · checked 5m ago\n")
+    engine.watch_until, engine.next_check = time.time() + 3600, time.time() + 300
+    asyncio.run(ec.handle("/status"))
+    assert re.fullmatch(r"\*Inbox\* chat on, every 2-10m · next \d\d:\d\d · hours 8-24h",
+                        sent[-1].split("\n")[1])
+    assert_style(sent[-1], 4)
 
 
 def test_pause_and_resume_say_when_nothing_changes(monkeypatch):
@@ -240,7 +246,7 @@ def test_pause_and_resume_say_when_nothing_changes(monkeypatch):
     assert sent[-1] == "ℹ️ *LinkedIn · already paused* · /resume starts it again"
     asyncio.run(ec.handle("/status"))
     assert sent[-1].startswith("🟡 *LinkedIn · paused* · /resume starts it again\n"
-                               "*Inbox* no check yet · every ")
+                               "*Inbox* no check yet · 3 a day · hours ")
 
 
 @pytest.mark.parametrize("state, first", [
@@ -458,7 +464,8 @@ def test_alerts_go_through_enc_chat(agent):
 def test_stream_commands_reach_the_engine_and_commands_are_registered(agent, monkeypatch):
     agent.events = [command(1, "pause"), command(2, "pause", sender="u2", username="x"),
                     command(3, "status")]
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=0, replies_sent=0, store=MemoryStore())
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     ec = enc.EncControl(engine)
@@ -652,7 +659,8 @@ def test_catchup_command_checks_days_and_stop(monkeypatch):
 
 
 def test_commands_reach_enc_chat_through_the_agent(agent, monkeypatch):
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=0, replies_sent=0, verbose=0)
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     ec = enc.EncControl(engine)
@@ -662,7 +670,7 @@ def test_commands_reach_enc_chat_through_the_agent(agent, monkeypatch):
     assert enc_texts[0] == enc.HELP
     assert enc_texts[1].startswith("🟢 *LinkedIn · running* · ")
     assert enc_texts[2].startswith("ℹ️ *LinkedIn · settings* · ")
-    assert "\n*Inbox* poll " in enc_texts[2]
+    assert "\n*Inbox* checks 3 · watch 2h · poll " in enc_texts[2]
     assert enc_texts[3].startswith("✅ *LinkedIn · paused*")
     enc.logging.getLogger().removeHandler(ec.verbose_log)
 
@@ -723,7 +731,7 @@ def test_set_answers_explain_and_warn(monkeypatch):
                             "/set dry_run off ends it")
         asyncio.run(ec.handle("/settings"))
         assert sent[-1].startswith("🟡 *LinkedIn · settings* · 1 changed\n")
-        assert "\n*Mode* dry_run *on* · scope " in sent[-1]
+        assert "\n*Mode* active_hours 8-24h · dry_run *on* · scope " in sent[-1]
         assert "\n*Defaults* dry_run off\n" in sent[-1]
         asyncio.run(ec.handle("/set scope all"))
         assert sent[-1].startswith("🟡 *LinkedIn · scope all* · may answer chats you started")
@@ -746,7 +754,7 @@ def test_settings_lists_every_setting_grouped():
     lines = text.split("\n")
     assert lines[0] == "ℹ️ *LinkedIn · settings* · all default"
     assert [line.split(" ")[0] for line in lines[1:-1]] == [
-        "*Inbox*", "*Pauses*", "*Hours*", "*Limits*", "*Back-off*", "*Mode*"]
+        "*Inbox*", "*Replies*", "*Invites*", "*Back-off*", "*Mode*"]
     assert lines[-1] == "/set name explains · /set name value changes · /reset name undoes"
     assert_style(text, 8)
 

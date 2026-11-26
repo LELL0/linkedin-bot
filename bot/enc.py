@@ -127,6 +127,7 @@ STATES = {
     "needs_login": ("🔴", "sign-in needed"),
     "no_proxy": ("🔴", "home tunnel down"),
     "asleep": ("ℹ️", "asleep"),
+    "resting": ("🟢", "running"),  # Chrome closed until the next check
     "starting": ("⏳", "starting"),
 }
 NEXT_STEP = {
@@ -136,12 +137,11 @@ NEXT_STEP = {
 }
 # /settings: one line each, at most three settings a line; a setting in none is under Other.
 SETTING_LINES = {
-    "Inbox": ("poll", "check_gap", "reply_delay"),
-    "Pauses": ("accept_gap", "catchup_gap"),
-    "Hours": ("active_hours", "invite_window"),
-    "Limits": ("max_replies", "max_accepts"),
-    "Back-off": ("backoff", "max_backoff"),
-    "Mode": ("dry_run", "scope"),
+    "Inbox": ("checks", "watch", "poll"),
+    "Replies": ("reply_delay", "max_replies", "catchup_gap"),
+    "Invites": ("invites", "accept_gap", "max_accepts"),
+    "Back-off": ("backoff", "max_backoff", "check_gap"),
+    "Mode": ("active_hours", "dry_run", "scope"),
 }
 LOG_ICONS = {logging.WARNING: "🟡", logging.ERROR: "🔴", logging.CRITICAL: "🔴"}
 KEY_ACTIONS = ("Accepted invitation", "Replied", "Paused", "Resumed", "Running", "DRY RUN")
@@ -885,14 +885,19 @@ class EncControl:
         dry_run = settings.CONFIG.dry_run
         if state == "running" and dry_run:
             emoji, name = "🟡", "running, dry run"
-        checked = (f"checked {ago(time.time() - engine.last_ok)}" if engine.last_ok
+        now = time.time()
+        checked = (f"checked {ago(now - engine.checked_at)}" if engine.checked_at
                    else "no check yet")
         step = NEXT_STEP.get(state)
+        pace = (f"chat on, every {settings.show('poll')}" if now < engine.watch_until
+                else f"{settings.show('checks')} a day")
+        upcoming = (f"next {owner_time(engine.next_check):%H:%M}"
+                    if not step and engine.next_check > now else None)
         log_level = f"log level {self.verbose}" if self.verbose else "log off"
         lines = [
             title(emoji, name, step or checked),
             "Nothing is sent or accepted · /set dry_run off" if dry_run else None,
-            part("Inbox", [checked if step else None, f"every {settings.show('poll')}",
+            part("Inbox", [checked if step else None, pace, upcoming,
                            f"hours {settings.show('active_hours')}"]),
             (f"*Since start* {plural(engine.accepted, 'accept')} · "
              f"{plural(engine.replies_sent, 'reply', 'replies')}"),
