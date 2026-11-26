@@ -43,7 +43,7 @@ class FakeLinkedIn:
         return Thread(urn, last, fields.get("group", False), fields.get("categories", []),
                       [ME, THEM], fields.get("org", False), {THEM: "Sam"})
 
-    async def list_threads(self, category):
+    async def list_threads(self, category, before=None):
         return [self.thread(urn) for urn in self.threads] if category == "PRIMARY_INBOX" else []
 
     async def list_messages(self, urn, count=30):
@@ -63,7 +63,8 @@ class FakeLinkedIn:
         pass
 
     async def list_invitations(self):
-        return list(self.invitations)
+        # Like LinkedIn: accepted invites leave the list, which shows 20 at a time.
+        return [i for i in self.invitations if i.urn not in self.accepted][:20]
 
     async def accept(self, invitation):
         if self.accept_fails:
@@ -89,11 +90,12 @@ class FakeBrain:
 def sim(tmp_path, monkeypatch):
     config = dataclasses.replace(
         CONFIG, dry_run=False, debounce_quiet_s=0.05, debounce_max_s=0.4,
-        metrics_path=tmp_path / "metrics.jsonl",
+        metrics_path=tmp_path / "metrics.jsonl", reply_delay_s=(0.0, 0.0),
+        accept_gap_s=(0.0, 0.0), active_hours=(0.0, 24.0), catchup_gap_s=(0.0, 0.0),
     )
     monkeypatch.setattr(engine_module, "CONFIG", config)
     monkeypatch.setattr(metrics, "CONFIG", config)
-    monkeypatch.setattr(engine_module, "alert", lambda text: None)
+    monkeypatch.setattr(engine_module, "alert", lambda *args, **kwargs: None)
     monkeypatch.setattr(engine_module, "write_status", lambda *a, **k: None)
 
     def build(api=None, mode="new_threads", store=None):
@@ -107,9 +109,19 @@ def sim(tmp_path, monkeypatch):
         bot.hot_until, bot.last_ok, bot.trigger, bot.invite_trigger = 0.0, time.time(), "poll", "poll"
         bot.replies_sent = bot.accepted = 0
         bot.state = "running"
+        bot.recovering = asyncio.Lock()
+        bot.backoff_until, bot.failures, bot.last_check = 0.0, 0, 0.0
+        bot.capped, bot.asleep = set(), False
+        bot.catchup_since, bot.catchup_task, bot.catchup_progress = {}, None, None
+        bot.paused = bot.replies_feed = False
+        bot.enc = SimpleNamespace(reply_sent=_no_feed)
         return bot
 
     return build
+
+
+async def _no_feed(*args):
+    return None
 
 
 async def settle(bot, rounds=3):
@@ -311,3 +323,34 @@ def test_failed_accept_is_tried_again(sim):
     bot.api.accept_fails = False
     asyncio.run(bot.check_invitations())
     assert bot.api.accepted == ["i1"]
+
+
+def test_paused_bot_does_nothing_until_resumed(sim):
+    bot = sim()
+    bot.api.add("t")
+    bot.api.invitations = [invite("i1", now_ms(-2))]
+    bot.paused = True
+
+    async def one_round():
+        task = asyncio.create_task(bot.poll_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(one_round())
+    assert bot.api.sent == [] and bot.api.accepted == []
+    bot.paused = False
+    asyncio.run(settle(bot))
+    assert len(bot.api.sent) == 1
+
+
+def test_reply_feed_gets_the_message_and_reply(sim):
+    bot = sim()
+    seen = []
+
+    async def feed(sender, incoming, reply):
+        seen.append((sender, incoming, reply))
+
+    bot.enc = SimpleNamespace(reply_sent=feed)
+    bot.api.add("t", text="hello there")
+    asyncio.run(settle(bot))
+    assert seen == [("Sam", ["hello there"], "sure")]

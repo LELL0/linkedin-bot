@@ -1,4 +1,4 @@
-"""Liveness for servers: a status file the bot rewrites, a check for Docker, and Telegram alerts."""
+"""Liveness for servers: a status file the bot rewrites, a check for Docker, and Enc Chat alerts."""
 
 import json
 import logging
@@ -8,19 +8,27 @@ import subprocess
 import threading
 import time
 
-import httpx
-
+from . import enc
 from .config import CONFIG
 
 log = logging.getLogger(__name__)
 
 STALE_STATUS_S = 180  # The bot rewrites the file every minute.
-STALE_POLL_S = 300  # No successful LinkedIn check for this long means it is stuck.
+
+
+def stale_poll_s() -> float:
+    """No successful LinkedIn check for this long means it is stuck. The bot waits up to
+    CONFIG.poll_s between checks on purpose (changeable from Enc Chat), so allow the longest
+    wait plus a check's time."""
+    return CONFIG.poll_s[1] + CONFIG.min_check_gap_s + 300
+
+
 ALERT_REPEAT_S = 3600
 
 
 def write_status(state: str, last_ok: float, **counts) -> None:
-    status = {"at": time.time(), "state": state, "last_ok": last_ok, **counts}
+    status = {"at": time.time(), "state": state, "last_ok": last_ok,
+              "stale_poll_s": stale_poll_s(), **counts}
     temporary = CONFIG.status_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(status))
     temporary.replace(CONFIG.status_path)
@@ -34,7 +42,9 @@ def problem(status: dict | None, now: float) -> str | None:
         return f"status not updated for {int(now - status.get('at', 0))}s"
     if status.get("state") == "needs_login":
         return "signed out of LinkedIn: log in over VNC"
-    if status.get("state") == "running" and now - status.get("last_ok", 0) > STALE_POLL_S:
+    # The healthcheck runs in its own process, so it takes the bot's live limit from the file.
+    limit = status.get("stale_poll_s") or stale_poll_s()
+    if status.get("state") == "running" and now - status.get("last_ok", 0) > limit:
         return f"no successful LinkedIn check for {int(now - status['last_ok'])}s"
     return None
 
@@ -54,23 +64,24 @@ def check() -> int:
 _last_sent: dict[str, float] = {}
 
 
-def alert(text: str) -> None:
-    """Log, then tell a person by Telegram (servers) or a desktop notification (laptop)."""
+def alert(state: str, detail: str = "", icon: str = "🟡") -> None:
+    """Log, then tell the owner on Enc Chat (servers) or by a desktop notification (laptop).
+
+    [state] is the problem in one to four lowercase words ("sign-in needed"), [detail] what
+    it means and what to do, and [icon] a title emoji: 🔴 down until the owner acts, 🟡 the
+    bot waits or hit a limit, ❌ one thing failed, ⏳ restarting. The same words within the
+    hour are sent once."""
+    text = f"{state}: {detail}" if detail else state
     log.error("ALERT: %s", text)
     now = time.time()
     if now - _last_sent.get(text, 0) < ALERT_REPEAT_S:
         return
     _last_sent[text] = now
-    token, chat = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
-    if token and chat:
-        try:
-            httpx.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": f"LinkedIn bot: {text}"},
-                timeout=10,
-            )
-        except httpx.HTTPError as error:
-            log.warning("Telegram alert failed: %s", type(error).__name__)
+    whole = f"{enc.title(icon if icon in enc.TITLE_EMOJI else '🟡', enc.inline(state, 60) or 'alert')}"
+    if detail.strip():
+        whole += "\n" + enc.inline(detail, 3000)
+    short = enc.alert_text(state, detail, icon)
+    enc.notify(short, whole if whole.replace("\n", enc.DOT) != short else None)
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],

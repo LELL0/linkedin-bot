@@ -130,9 +130,16 @@ def build_prompt(history: list[Message], pending: list[Message], self_id: str, s
     fresh = "\n".join(f"Them: {untrusted(render_message(m))}" for m in pending)
     name = re.sub(r"[^\w' -]", "", sender)[:40] or "unknown"
     now = datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %Z")
+    late = ""
+    if pending:
+        hours = (time.time() - pending[-1].delivered_at / 1000) / 3600
+        if hours >= 3:
+            waited = f"{hours:.0f} hours" if hours < 48 else f"{hours / 24:.0f} days"
+            late = (f"Their latest message came {waited} ago and you are only answering now: "
+                    "if it fits, say sorry for the late reply in a few words, no excuses. ")
     return (
         f"Current time: {now}. Their first name: {name}. "
-        f"Chat already started: {'yes' if earlier else 'no'}.\n"
+        f"Chat already started: {'yes' if earlier else 'no'}. {late}\n"
         f"<conversation>\n{chr(10).join(earlier)}\n</conversation>\n"
         f"<new_messages>\n{fresh}\n</new_messages>"
     )

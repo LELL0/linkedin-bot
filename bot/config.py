@@ -8,11 +8,17 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+def _range(name: str, default: str) -> tuple[float, float]:
+    """"a-b" from the environment as (a, b)."""
+    low, _, high = os.environ.get(name, default).partition("-")
+    return float(low), float(high or low)
+
+
 DATA_DIR = Path(os.environ.get("BOT_DATA_DIR", Path.home() / ".local/share/linkedin-bot"))
 
 
-@dataclass(frozen=True)
-class Config:
+@dataclass
+class Config:  # Not frozen: bot.settings changes some fields from Enc Chat.
     profile_dir: Path = DATA_DIR / "chrome-profile"
     db_path: Path = DATA_DIR / "state.db"
     log_path: Path = DATA_DIR / "bot.log"
@@ -44,12 +50,36 @@ class Config:
     # Wait for this much silence before answering, so a burst gets one reply.
     debounce_quiet_s: float = 3.0
     debounce_max_s: float = 9.0
-    # Backstop polling. The realtime wake-up is the fast path.
-    idle_poll_s: float = float(os.environ.get("IDLE_POLL_S", "12"))
-    # Invites get their own quick check, because accept speed is what matters there.
-    invite_poll_s: float = float(os.environ.get("INVITE_POLL_S", "4"))
-    hot_poll_s: float = 2.0
-    hot_window_s: float = 90.0
-
+    # LinkedIn watches request rates per account, so the bot is slow on purpose. The inbox
+    # is checked every 5-15 minutes (random), and realtime events do not make it sooner.
+    poll_s: tuple[float, float] = _range("POLL_S", "300-900")
+    # Invitations are handled once a day, at a random time in this window (local hours),
+    # all at once with a short gap between accepts.
+    invite_window: tuple[float, float] = _range("INVITE_WINDOW", "9-11")
+    accept_gap_s: tuple[float, float] = _range("ACCEPT_GAP_S", "20-90")
+    # Never check the inbox more often than this.
+    min_check_gap_s: float = float(os.environ.get("MIN_CHECK_GAP_S", "60"))
+    # Local hours (start-end, 24h clock) when the bot works. Outside them it makes no
+    # requests at all, like a person who is asleep; what arrives is answered in the morning.
+    active_hours: tuple[float, float] = _range("ACTIVE_HOURS", "8-24")
+    # A person does not answer the second a message is seen.
+    reply_delay_s: tuple[float, float] = _range("REPLY_DELAY_S", "25-150")
+    # /catchup: pause between two old conversations it answers.
+    catchup_gap_s: tuple[float, float] = _range("CATCHUP_GAP_S", "90-300")
+    max_accepts_per_day: int = int(os.environ.get("MAX_ACCEPTS_PER_DAY", "0"))  # 0: all
+    max_replies_per_day: int = int(os.environ.get("MAX_REPLIES_PER_DAY", "40"))
+    # Waits after LinkedIn pushes back (429, 999, 5xx) or rejects the session, doubling
+    # each time up to the maximum.
+    backoff_s: float = 300.0
+    max_backoff_s: float = 4 * 3600.0
+    # Route every LinkedIn request through this proxy, e.g. socks5://172.17.0.1:1080: a
+    # tunnel to the owner's home connection. A cloud server's address is what LinkedIn
+    # distrusts most; signed in from a datacenter, the account was signed out twice
+    # (2026-11-08 and 11-09). When set, Chrome only opens once the proxy answers, and it
+    # never falls back to the server's own address.
+    proxy: str = os.environ.get("BOT_PROXY", "")
+    # Close Chrome outside active_hours, so no LinkedIn tab stays connected all night,
+    # and open it again at a random time up to this many minutes after they start.
+    wake_jitter_s: tuple[float, float] = _range("WAKE_JITTER_S", "0-2400")
 
 CONFIG = Config()

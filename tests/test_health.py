@@ -25,7 +25,12 @@ def test_signed_out_is_unhealthy():
 
 
 def test_no_successful_check_is_unhealthy():
-    assert "no successful" in health.problem(status(last_ok=NOW - 600), NOW)
+    assert "no successful" in health.problem(status(last_ok=NOW - health.stale_poll_s() - 1), NOW)
+
+
+def test_waiting_the_longest_poll_gap_is_healthy():
+    gap = health.CONFIG.poll_s[1] + health.CONFIG.min_check_gap_s
+    assert health.problem(status(last_ok=NOW - gap), NOW) is None
 
 
 def test_starting_bot_is_not_judged_on_polls_yet():
@@ -48,11 +53,16 @@ def test_check_reads_the_status_file(tmp_path, monkeypatch):
 
 def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
     sent = []
-    monkeypatch.setenv("TG_BOT_TOKEN", "t")
-    monkeypatch.setenv("TG_CHAT_ID", "c")
-    monkeypatch.setattr(health.httpx, "post", lambda *a, **k: sent.append(k["json"]["text"]))
+    monkeypatch.setattr(health.enc, "notify", lambda text, details=None: sent.append(text))
     monkeypatch.setattr(health.shutil, "which", lambda name: None)
     health._last_sent.clear()
     health.alert("signed out")
     health.alert("signed out")
-    assert sent == ["LinkedIn bot: signed out"]
+    health.alert("on hold", "back in 5m", "🟡")
+    health.alert("on hold", "back in 5m", "🟡")
+    assert sent == ["🟡 *LinkedIn · signed out*", "🟡 *LinkedIn · on hold* · back in 5m"]
+
+
+def test_healthcheck_uses_the_limit_the_bot_wrote():
+    assert health.problem(status(last_ok=NOW - 5000, stale_poll_s=6000), NOW) is None
+    assert "no successful" in health.problem(status(last_ok=NOW - 5000, stale_poll_s=4000), NOW)
