@@ -103,6 +103,8 @@ ssh -N -L 5901:localhost:5901 your-server       # from your computer, then VNC t
 cat data/vnc-password                           # VNC password, created on first start
 ```
 
+Before a deploy, or a pull request to `main`, run `scripts/check.sh --docker` on your computer. It checks the last commit in a clean clone, the way CI does (no `.env`, no uncommitted edits): `uv sync --locked`, the tests, the pre-commit hooks and gitleaks over the whole history, which are the `test` and `secrets` checks `main` requires. `--docker` also builds the server image, imports every module in it and starts its Chromium; add `--platform linux/arm64` to build for an arm64 server. `tests/test_deploy.py` keeps `deploy/` in step with the code, since CI never builds the image: the Playwright version in the `FROM` tag, the pip pin and `uv.lock` must match, every imported package must be installed in the image, and VNC stays on the server's loopback.
+
 ### LinkedIn through your home connection
 
 A cloud server's address is the strongest bot signal LinkedIn sees: the account was signed out twice in two days (2026-11-08, 11-09) while the bot ran from an Oracle datacenter in Frankfurt and the owner used LinkedIn from home. Send the bot's LinkedIn traffic through your home connection instead, with a reverse SOCKS tunnel from a computer at home that stays on:
