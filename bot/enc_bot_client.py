@@ -24,14 +24,18 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = ["Bot", "EncBotError", "verify_webhook"]
+
+# What a file event's url is: a path of this agent, never another server.
+_FILE_URL = re.compile(r"/v1/files/[A-Za-z0-9_-]+")
 
 
 class EncBotError(Exception):
@@ -103,26 +107,33 @@ class Bot:
     def me(self):
         return self._request("GET", "/v1/me")
 
-    def send(self, text, to="owner", buttons=None, reply_to=None):
+    def send(self, text, to="owner", buttons=None, reply_to=None, details=None):
         """Sends [text] to "owner", "@username" or a user id (one of the bot's people
-        who wrote to it). [buttons]: rows of {"label", "data"}. Returns the message id,
+        who wrote to it). [buttons]: rows of {"label", "data"}. [details]: a longer
+        text behind a Details button; a tap shows it in place of [text] and Less
+        shows [text] again (the agent does both, no event). Returns the message id,
         or None when Enc Chat is unreachable and the agent queued it (it goes later,
         within 24 hours, in order)."""
         body = {"to": to, "text": text}
         if buttons is not None:
             body["buttons"] = buttons
+        if details:
+            body["details"] = details
         if reply_to:
             body["replyTo"] = reply_to
         out = self._request("POST", "/v1/messages", body)
         return out.get("messageId")
 
-    def edit(self, message_id, text=None, buttons=None):
-        """New text and/or buttons on a message the bot sent. buttons=[] removes them."""
+    def edit(self, message_id, text=None, buttons=None, details=None):
+        """New text and/or buttons on a message the bot sent. buttons=[] removes them.
+        [details] keeps a Details button under it (see send); an edit without it drops them."""
         body = {}
         if text is not None:
             body["text"] = text
         if buttons is not None:
             body["buttons"] = buttons
+        if details:
+            body["details"] = details
         self._request("PATCH", "/v1/messages/" + urllib.parse.quote(message_id, safe=""), body)
 
     def delete(self, message_id):
@@ -168,7 +179,10 @@ class Bot:
         return out.get("messageId")
 
     def download(self, url):
-        """The bytes of a file a person sent: the event's file["url"]."""
+        """The bytes of a file a person sent: the event's file["url"]. Only a
+        /v1/files/<token> path of this agent is fetched: the secret goes with it."""
+        if not isinstance(url, str) or not _FILE_URL.fullmatch(url):
+            raise EncBotError("BAD_REQUEST", "not a file url of this agent (/v1/files/<token>)")
         return self._request("GET", url, timeout=max(self.timeout, 120))
 
     # ── Events ──────────────────────────────────────────────────────────

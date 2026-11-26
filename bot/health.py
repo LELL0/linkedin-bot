@@ -77,7 +77,11 @@ def alert(state: str, detail: str = "", icon: str = "🟡") -> None:
     if now - _last_sent.get(text, 0) < ALERT_REPEAT_S:
         return
     _last_sent[text] = now
-    enc.notify(enc.alert_text(state, detail, icon))
+    whole = f"{enc.title(icon if icon in enc.TITLE_EMOJI else '🟡', enc.inline(state, 60) or 'alert')}"
+    if detail.strip():
+        whole += "\n" + enc.inline(detail, 3000)
+    short = enc.alert_text(state, detail, icon)
+    enc.notify(short, whole if whole.replace("\n", enc.DOT) != short else None)
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],

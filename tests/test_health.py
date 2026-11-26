@@ -53,7 +53,7 @@ def test_check_reads_the_status_file(tmp_path, monkeypatch):
 
 def test_alerts_are_not_repeated_within_the_hour(monkeypatch):
     sent = []
-    monkeypatch.setattr(health.enc, "notify", sent.append)
+    monkeypatch.setattr(health.enc, "notify", lambda text, details=None: sent.append(text))
     monkeypatch.setattr(health.shutil, "which", lambda name: None)
     health._last_sent.clear()
     health.alert("signed out")

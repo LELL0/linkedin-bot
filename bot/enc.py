@@ -22,6 +22,10 @@ phone is about 35 characters wide:
   clock times 18:40 on the owner's clock (owner_time(), Beirut).
 - A refusal or a bad argument is one line that says what to type (`Use /verbose 0-5`).
 - /help and the "/" menu come from the same COMMANDS list, so they always match.
+- Few messages, Details for the rest (2026-11-26): a message shows what to know at a glance
+  and carries the rest as `details` (SDK 0.6.0): a Details button under it opens the long
+  text in the same message. The reply feed goes out at most every FEED_EVERY_S as one
+  message, the log at most every few minutes (VERBOSE_LEVELS), its newest lines first.
 Enc Chat 1.7.14 draws the marks; older apps show them as typed, so each message also reads as
 plain text. Text from outside (names, messages, errors) goes through marks.inline() first, so
 it stays on its line and cannot add a mark of its own. The bot sends nothing to Telegram.
@@ -99,7 +103,10 @@ def help_line(name: str, argument: str, description: str) -> str:
 HELP = "\n".join([title("ℹ️", "help", "I accept invites and answer messages for you"),
                   *(help_line(*command) for command in COMMANDS)])
 MAX_MESSAGE = 4000
-VERBOSE_LIMIT = 2100  # characters of log per message (about 30 lines); older lines left out
+VERBOSE_LIMIT = 3800  # characters of log in Details (the agent cuts at 4000); older lines left out
+VERBOSE_SHORT = 5  # newest log lines in the message itself; the rest behind Details
+FEED_EVERY_S = 600  # the reply feed: at most one message this often, every reply since in it
+FEED_SHORT = 6  # people named in one feed message; the rest behind Details
 QUOTE_LINES = 3  # lines of one incoming message in the replies feed
 QUOTES = 8  # lines of incoming messages in one feed message
 REPLY_LINES = 4  # lines of the reply in the replies feed
@@ -107,11 +114,11 @@ REPLY_LINES = 4  # lines of the reply in the replies feed
 # between the messages with the log.
 VERBOSE_LEVELS = {
     0: ("off, only alerts", "off", 0),
-    1: ("warnings and errors", "warnings", 300),
-    2: ("warnings, accepts and replies", "+ accepts, replies", 120),
-    3: ("everything but the heartbeat", "all but heartbeat", 60),
-    4: ("everything with the heartbeat", "+ heartbeat", 30),
-    5: ("everything, debug and libraries too", "+ debug", 30),
+    1: ("warnings and errors", "warnings", 600),
+    2: ("warnings, accepts and replies", "+ accepts, replies", 600),
+    3: ("everything but the heartbeat", "all but heartbeat", 300),
+    4: ("everything with the heartbeat", "+ heartbeat", 120),
+    5: ("everything, debug and libraries too", "+ debug", 120),
 }
 # How /status names the engine's state, and what the owner can do about it.
 STATES = {
@@ -307,24 +314,68 @@ def catchup_limit_text(answered: int, left: int) -> str:
                       f"*So far* {answered} answered · {left} left · /catchup again tomorrow"])
 
 
-def verbose_message(lines: list[str], limit: int = VERBOSE_LIMIT) -> str:
+def _log_head(lines: list[str], fact: str) -> str:
+    problems = sum(line.startswith(tuple(LOG_ICONS.values())) for line in lines)
+    return (title("🟡", f"log, {plural(problems, 'problem')}", fact) if problems
+            else title("ℹ️", "log", fact))
+
+
+def verbose_message(lines: list[str], short: int = VERBOSE_SHORT) -> str:
     """Log lines for one message: a title (🟡 when a line is a warning or an error), then
-    the newest lines that fit as a list, each on one line, cut to fit and made inert."""
+    the newest [short] lines as a list, each on one line, cut to fit and made inert. The
+    rest is in verbose_details()."""
+    kept = [inline(line, LINE_MAX - 2) for line in lines[-short:]]
+    more = len(lines) - len(kept)
+    fact = plural(len(lines), "line") + (f" · {more} more in Details" if more else "")
+    return "\n".join([_log_head(lines, fact), *(f"- {line}" for line in kept)])
+
+
+def verbose_details(lines: list[str], limit: int = VERBOSE_LIMIT) -> str | None:
+    """Every log line that fits [limit], newest last, whole (inert): what Details shows.
+    None when the message itself already holds them all, uncut."""
     kept: list[str] = []
     size = 0
     for line in reversed(lines):
-        line = inline(line, LINE_MAX - 2)
+        line = inline(line, 400)
         size += len(line) + 3
         if size > limit:
             break
         kept.append(line)
     kept.reverse()
     left_out = len(lines) - len(kept)
-    problems = sum(line.startswith(tuple(LOG_ICONS.values())) for line in kept)
+    if not left_out and len(lines) <= VERBOSE_SHORT and all(len(x) <= LINE_MAX - 2 for x in kept):
+        return None
     fact = plural(len(kept), "line") + (f" · {left_out} older left out" if left_out else "")
-    head = (title("🟡", f"log, {plural(problems, 'problem')}", fact) if problems
-            else title("ℹ️", "log", fact))
-    return "\n".join([head, *(f"- {line}" for line in kept)])
+    return "\n".join([_log_head(kept, fact), *(f"- {line}" for line in kept)])
+
+
+def cut_line(text: str, width: int = LINE_MAX) -> str:
+    """[text] on one line of at most [width], cut at a word end with …"""
+    if len(text) <= width:
+        return text
+    cut = text[:width - 1]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > width // 2 else cut).rstrip(" ,;:·") + "…"
+
+
+def reply_text(sender: str, incoming: list[str], reply: str, short: bool = True) -> tuple[str, str | None]:
+    """One answered conversation: who, each message quoted, and the reply, long text cut into
+    lines that fit, outside text inert (marks.inline). Short: two quoted lines and two of the
+    reply, with the whole conversation as details; long (short=False): all of it."""
+    who = inline(sender, 30) or "someone"
+    most_quotes, most_reply = (2, 2) if short else (QUOTES * 3, REPLY_LINES * 4)
+    quoted = [f"> {line}" for message in incoming if (text := inline(message, 1000))
+              for line in wrap(text, LINE_MAX - 2, QUOTE_LINES if short else QUOTE_LINES * 2)]
+    if len(quoted) > most_quotes:
+        quoted = [*quoted[:most_quotes - 1], "> …"]
+    label = "↩️ *Reply* "
+    answer = wrap(inline(reply, 2000) or "…", LINE_MAX, most_reply, first=LINE_MAX - len(label))
+    text = "\n".join([title("🆕", f"replied to {who}"), *(quoted or ["> …"]),
+                      label + answer[0], *(start_safe(a) for a in answer[1:])])
+    if not short:
+        return text, None
+    whole = reply_text(sender, incoming, reply, short=False)[0]
+    return text, (whole if whole != text else None)
 
 
 class ChatLogFormatter(logging.Formatter):
@@ -497,14 +548,15 @@ def client_from_env() -> Bot | None:
     return Bot(os.environ.get("ENC_BOT_URL", "http://enc-bot-agent:8787").strip(), secret)
 
 
-def notify(text: str) -> bool:
-    """Send [text] to the owner from any thread (health alerts). True when the agent took it;
-    a message it queued while Enc Chat is unreachable counts. Never raises, logs a code only."""
+def notify(text: str, details: str | None = None) -> bool:
+    """Send [text] to the owner from any thread (health alerts), [details] behind its Details
+    button. True when the agent took it; a message it queued while Enc Chat is unreachable
+    counts. Never raises, logs a code only."""
     bot = client_from_env()
     if bot is None:
         return False
     try:
-        bot.send(text[:MAX_MESSAGE])
+        bot.send(text[:MAX_MESSAGE], details=details[:MAX_MESSAGE] if details else None)
     except EncBotError as error:
         log.warning("Enc Chat alert failed: %s", error.code)
         return False
@@ -518,6 +570,8 @@ class EncControl:
         self.owner = self.owner_from_env()
         self.seen: collections.deque[str] = collections.deque(maxlen=SEEN_EVENTS)
         self.verbose_log = VerboseHandler()
+        self.feed: list[tuple[str, list[str], str]] = []  # replies waiting for the next feed message
+        self.feed_since = 0.0
         if self.enabled:
             if not self.owner:
                 log.warning("ENC_OWNER_MISSING: ENC_OWNER is unset or not an Enc user id or "
@@ -533,12 +587,13 @@ class EncControl:
     def enabled(self) -> bool:
         return self.bot is not None
 
-    async def send(self, text: str) -> None:
-        """[text] to the owner on Enc Chat. A refusal is logged, never raised."""
+    async def send(self, text: str, details: str | None = None) -> None:
+        """[text] to the owner on Enc Chat, [details] behind its Details button. A refusal is
+        logged, never raised."""
         text = text[:MAX_MESSAGE]
         if self.bot is not None:
             try:
-                await asyncio.to_thread(self.bot.send, text)
+                await asyncio.to_thread(self.bot.send, text, details=details[:MAX_MESSAGE] if details else None)
             except EncBotError as error:
                 log.warning("Enc Chat send failed: %s", error.code)
 
@@ -629,19 +684,21 @@ class EncControl:
         await self.handle(f"/{event.get('command', '')} {args}".strip())
 
     async def verbose_loop(self) -> None:
-        """Send the log lines the /verbose level shows, as often as the level says."""
+        """Send the log lines the /verbose level shows, as often as the level says, and the
+        reply feed once FEED_EVERY_S has passed since its first reply."""
         last_sent = time.monotonic()
         while True:
-            await asyncio.sleep(VERBOSE_LEVELS[4][2])
+            await asyncio.sleep(30)
+            await self.flush_feed()
             every = VERBOSE_LEVELS[self.verbose][2]
-            if time.monotonic() - last_sent >= every - 1:
+            if every and time.monotonic() - last_sent >= every - 1:
                 await self.send_verbose()
                 last_sent = time.monotonic()
 
     async def send_verbose(self) -> None:
         lines = self.verbose_log.take(self.verbose)
         if lines:
-            await self.send(verbose_message(lines))
+            await self.send(verbose_message(lines), verbose_details(lines))
 
     async def set_verbose(self, argument: str) -> None:
         current = self.verbose
@@ -844,17 +901,28 @@ class EncControl:
         return "\n".join(line for line in lines if line)
 
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:
-        """Each answered conversation: who, each message quoted, and the reply. Long text is
-        cut into lines that fit; outside text stays inert (marks.inline)."""
+        """An answered conversation joins the reply feed; flush_feed() sends what waits as
+        one message at most every FEED_EVERY_S."""
         if not (self.enabled and self.engine.replies_feed):
             return
-        who = inline(sender, 30) or "someone"
-        quoted = [f"> {line}" for message in incoming if (text := inline(message, 1000))
-                  for line in wrap(text, LINE_MAX - 2, QUOTE_LINES)]
-        if len(quoted) > QUOTES:
-            quoted = [*quoted[:QUOTES - 1], "> …"]
-        label = "↩️ *Reply* "
-        answer = wrap(inline(reply, 2000) or "…", LINE_MAX, REPLY_LINES,
-                      first=LINE_MAX - len(label))
-        await self.send("\n".join([title("🆕", f"replied to {who}"), *(quoted or ["> …"]),
-                                   label + answer[0], *(start_safe(a) for a in answer[1:])]))
+        if not self.feed:
+            self.feed_since = time.monotonic()
+        self.feed.append((sender, list(incoming), reply))
+
+    async def flush_feed(self, force: bool = False) -> None:
+        """The replies since the last feed message, as one message, once FEED_EVERY_S has
+        passed since the first of them (or at once with [force])."""
+        if not self.feed or not (force or time.monotonic() - self.feed_since >= FEED_EVERY_S):
+            return
+        items, self.feed = self.feed, []
+        if len(items) == 1:
+            await self.send(*reply_text(*items[0]))
+            return
+        lines = [title("🆕", f"{len(items)} replies sent")]
+        for sender, _incoming, reply in items[:FEED_SHORT]:
+            who = inline(sender, 30) or "someone"
+            lines.append(start_safe(cut_line(f"*{who}* {inline(reply, 300) or '…'}")))
+        if len(items) > FEED_SHORT:
+            lines.append(f"+{len(items) - FEED_SHORT} more in Details")
+        details = "\n\n".join(reply_text(*item, short=False)[0] for item in items)
+        await self.send("\n".join(lines), details[:MAX_MESSAGE])

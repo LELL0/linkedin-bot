@@ -192,9 +192,11 @@ def control(monkeypatch):
     ec = enc.EncControl(engine)
     sent = []
 
-    async def send(text):
+    async def send(text, details=None):
         sent.append(text)
+        ec.details.append(details)
 
+    ec.details = []
     ec.send = send
     return ec, engine, sent
 
@@ -266,12 +268,18 @@ def test_status_in_dry_run_is_not_green(monkeypatch):
     assert_style(sent[-1], 5)
 
 
+def feed(ec, *args):
+    """One reply into the feed, and the feed sent at once."""
+    asyncio.run(ec.reply_sent(*args))
+    asyncio.run(ec.flush_feed(force=True))
+
+
 def test_reply_feed_quotes_with_marks_inert_and_only_when_on(monkeypatch):
     ec, engine, sent = control(monkeypatch)
-    asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```"], "hey"))
+    feed(ec, "Sam", ["*hi* ```x```"], "hey")
     assert sent == []
     engine.replies_feed = True
-    asyncio.run(ec.reply_sent("Sam", ["*hi* ```x```", "line one\n\n# not a heading"], "_ok_"))
+    feed(ec, "Sam", ["*hi* ```x```", "line one\n\n# not a heading"], "_ok_")
     # One quoted line per short message, the reply after: nothing from outside adds a mark.
     assert sent[0] == ("🆕 *LinkedIn · replied to Sam*\n> \u2217hi\u2217 '''x'''\n"
                        "> line one # not a heading\n↩️ *Reply* \uff3fok\uff3f")
@@ -281,9 +289,9 @@ def test_reply_feed_quotes_with_marks_inert_and_only_when_on(monkeypatch):
 def test_reply_feed_name_cannot_add_marks_or_lines(monkeypatch):
     ec, engine, sent = control(monkeypatch)
     engine.replies_feed = True
-    asyncio.run(ec.reply_sent("_Sam_\n## Boss", ["hi"], "hey"))
-    asyncio.run(ec.reply_sent("", ["hi"], "hey"))
-    asyncio.run(ec.reply_sent("Ana", ["", " "], "line one\n- line two"))
+    feed(ec, "_Sam_\n## Boss", ["hi"], "hey")
+    feed(ec, "", ["hi"], "hey")
+    feed(ec, "Ana", ["", " "], "line one\n- line two")
     assert sent[0] == "🆕 *LinkedIn · replied to \uff3fSam\uff3f ## Boss*\n> hi\n↩️ *Reply* hey"
     assert sent[1].startswith("🆕 *LinkedIn · replied to someone*\n")
     assert sent[2] == "🆕 *LinkedIn · replied to Ana*\n> …\n↩️ *Reply* line one - line two"
@@ -294,16 +302,35 @@ def test_reply_feed_wraps_long_text_into_short_lines(monkeypatch):
     engine.replies_feed = True
     long = " ".join(f"word{n}" for n in range(200))
     reply = "Sure, " + "this is a fairly long reply " * 4 + "- 1. # > ```"
-    asyncio.run(ec.reply_sent("Sam", [long, "short", long, long], reply))
+    feed(ec, "Sam", [long, "short", long, long], reply)
+    # The message: two quoted lines and two of the reply; the whole conversation in Details.
     lines = sent[0].split("\n")
     quotes = [line for line in lines if line.startswith("> ")]
-    assert len(quotes) == enc.QUOTES and quotes[-1] == "> …"
-    assert quotes[0].startswith("> word0 word1 ") and quotes[2].endswith("…")
-    assert quotes[3] == "> short"
+    assert len(quotes) == 2 and quotes[0].startswith("> word0 word1 ") and quotes[-1] == "> …"
     at = next(n for n, line in enumerate(lines) if line.startswith("↩️ *Reply* Sure, "))
-    assert 1 < len(lines) - at <= enc.REPLY_LINES
-    assert not any(BLOCK_START.match(line) for line in lines[at + 1:])  # no list or heading
-    assert_style(sent[0], 1 + enc.QUOTES + enc.REPLY_LINES)
+    assert 1 < len(lines) - at <= 2
+    assert_style(sent[0], 5)
+    whole = ec.details[0].split("\n")
+    quotes = [line for line in whole if line.startswith("> ")]
+    assert len(quotes) > 2 and quotes[-1].endswith("…") and "> short" in quotes
+    at = next(n for n, line in enumerate(whole) if line.startswith("↩️ *Reply* Sure, "))
+    assert not any(BLOCK_START.match(line) for line in whole[at + 1:])  # no list or heading
+
+
+def test_reply_feed_is_one_message_per_window(monkeypatch):
+    ec, engine, sent = control(monkeypatch)
+    engine.replies_feed = True
+    for name in ("Sam", "Ana", "Lee"):
+        asyncio.run(ec.reply_sent(name, ["hi"], f"hello {name}"))
+    asyncio.run(ec.flush_feed())  # the window has not passed: nothing yet
+    assert sent == []
+    ec.feed_since -= enc.FEED_EVERY_S
+    asyncio.run(ec.flush_feed())
+    assert sent == ["🆕 *LinkedIn · 3 replies sent*\n*Sam* hello Sam\n*Ana* hello Ana\n*Lee* hello Lee"]
+    assert ec.details[0].count("replied to") == 3
+    assert_style(sent[0], 4)
+    asyncio.run(ec.flush_feed(force=True))
+    assert len(sent) == 1
 
 
 def test_wrap_keeps_lines_short_and_marks_a_cut():
@@ -522,7 +549,7 @@ def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
     asyncio.run(ec.handle("/verbose 2"))
     assert engine.verbose == 2
     assert sent[-1] == ("✅ *LinkedIn · log level 2* · warnings, accepts and replies\n"
-                        "Sent every 2m · /verbose 0 stops it")
+                        "Sent every 10m · /verbose 0 stops it")
     log = enc.logging.getLogger("bot.engine")
     for text in ("Accepted invitation: {}", "Draft rejected: too long", "alive: accepted=1"):
         ec.verbose_log.emit(log.makeRecord("bot.engine", 20, __file__, 1, text, (), None))
@@ -544,7 +571,7 @@ def test_verbose_sets_a_level_and_sends_only_its_lines(monkeypatch):
     assert sent[-1] == ("ℹ️ *LinkedIn · log level 2* · warnings, accepts and replies\n"
                         "*Levels* 0 off · 1 warnings · 2 + accepts, replies\n"
                         "*More levels* 3 all but heartbeat · 4 + heartbeat · 5 + debug\n"
-                        "/verbose 0-5 changes it · sent every 2m")
+                        "/verbose 0-5 changes it · sent every 10m")
     asyncio.run(ec.handle("/verbose off"))
     assert engine.verbose == 0
     assert sent[-1] == "✅ *LinkedIn · log off* · only alerts come here"
@@ -590,9 +617,13 @@ def test_log_lines_are_short_one_line_items():
     assert lines[1].startswith("- 🔴 ") and "\u2217thing\u2217 second line" in lines[1]
     assert lines[2] == "- - # \u2217\u2217x\u2217\u2217"  # inert, on its line
     assert len(lines[3]) == enc.LINE_MAX and lines[3].endswith("…")
-    cut = enc.verbose_message([f"line {n}" for n in range(1000)], limit=100)
-    assert cut.startswith("ℹ️ *LinkedIn · log* · 9 lines · 991 older left out\n- line 991\n")
-    assert_style(cut, 10)
+    many = [f"line {n}" for n in range(1000)]
+    cut = enc.verbose_message(many)
+    assert cut.startswith("ℹ️ *LinkedIn · log* · 1000 lines · 995 more in Details\n- line 995\n")
+    assert_style(cut, 6)
+    whole = enc.verbose_details(many, limit=100)
+    assert whole.startswith("ℹ️ *LinkedIn · log* · 9 lines · 991 older left out\n- line 991\n")
+    assert enc.verbose_details(["a", "b"]) is None  # the message already holds it all
 
 
 def test_catchup_command_checks_days_and_stop(monkeypatch):
@@ -886,7 +917,7 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     from bot import engine as engine_module
 
     sent = []
-    monkeypatch.setattr(health.enc, "notify", sent.append)
+    monkeypatch.setattr(health.enc, "notify", lambda text, details=None: sent.append(text))
     monkeypatch.setattr(health.shutil, "which", lambda name: None)
     health._last_sent.clear()
 
