@@ -40,6 +40,9 @@ class Thread:
     has_organization: bool
     names: dict[str, str] = field(default_factory=dict)
     messages: list[Message] = field(default_factory=list)
+    # Each person's LinkedIn headline (role and company, written by them), from the
+    # conversation data the inbox check already loads: no profile visit.
+    headlines: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,7 +95,7 @@ def parse_message(raw: dict) -> Message:
 
 
 def parse_thread(raw: dict) -> Thread:
-    participants, names, has_organization = [], {}, False
+    participants, names, headlines, has_organization = [], {}, {}, False
     for person in raw.get("conversationParticipants") or []:
         kind = person.get("participantType") or {}
         if kind.get("organization") is not None:
@@ -100,7 +103,9 @@ def parse_thread(raw: dict) -> Thread:
         pid = profile_id(person.get("entityUrn"))
         if pid:
             participants.append(pid)
-            names[pid] = _text((kind.get("member") or {}).get("firstName"))
+            member = kind.get("member") or {}
+            names[pid] = _text(member.get("firstName"))
+            headlines[pid] = _text(member.get("headline"))
     messages = [parse_message(m) for m in (raw.get("messages") or {}).get("elements") or []]
     return Thread(
         urn=raw.get("entityUrn", ""),
@@ -111,4 +116,5 @@ def parse_thread(raw: dict) -> Thread:
         has_organization=has_organization,
         names=names,
         messages=sorted(messages, key=lambda m: m.delivered_at),
+        headlines=headlines,
     )

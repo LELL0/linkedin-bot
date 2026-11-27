@@ -1,8 +1,11 @@
-"""Chrome only opens in active hours and through the proxy, and closes for the night."""
+"""Chrome only opens in active hours and through the proxy, only when a check needs it, and
+closes between checks and for the night."""
 
 import asyncio
 import dataclasses
 import socket
+import time
+from types import SimpleNamespace
 
 from bot import engine as engine_module
 from bot import session as session_module
@@ -26,7 +29,7 @@ class FakeSession:
 
 
 def make_bot(monkeypatch, **config):
-    conf = dataclasses.replace(CONFIG, wake_jitter_s=(0.0, 0.0), **config)
+    conf = dataclasses.replace(CONFIG, **config)
     monkeypatch.setattr(engine_module, "CONFIG", conf)
     alerts: list[str] = []
     monkeypatch.setattr(engine_module, "alert", lambda *args: alerts.append(" ".join(args)))
@@ -35,6 +38,13 @@ def make_bot(monkeypatch, **config):
     bot.session = FakeSession()
     bot.state, bot.last_ok, bot.accepted, bot.replies_sent = "starting", 0.0, 0, 0
     bot.workers, bot.catchup_task, bot.started = {}, None, True
+    bot.busy, bot.watch_until, bot.paused, bot.backoff_until = 0, 0.0, False, 0.0
+    bot.next_check = bot.next_invites = time.time() + 3 * 3600
+    bot.opening = asyncio.Lock()
+    meta: dict[str, str] = {}
+    bot.store = SimpleNamespace(get_meta=lambda key, default="": meta.get(key, default),
+                                set_meta=meta.__setitem__)
+    bot.capped = set()
 
     async def signed_in():
         bot.state = "running"
@@ -128,17 +138,66 @@ def test_chrome_stays_open_while_a_reply_is_pending(monkeypatch):
     assert bot.session.stops == 0 and bot.state == "running"
 
 
-def test_chrome_opens_again_in_the_morning(monkeypatch):
+def open_in_the_day(monkeypatch, **fields):
     bot, _ = make_bot(monkeypatch, proxy="")
-    bot.state = "asleep"
+    bot.state, bot.session.open = "running", True
+    for name, value in fields.items():
+        setattr(bot, name, value)
     monkeypatch.setattr(engine_module, "in_active_hours", lambda: True)
-
-    async def idle(state, seconds):
-        pass
-
-    bot.idle = idle
     run_browser_loop_once(monkeypatch, bot)
+    return bot
+
+
+def test_chrome_closes_between_checks(monkeypatch):
+    bot = open_in_the_day(monkeypatch)
+    assert bot.session.stops == 1 and bot.state == "resting"
+
+
+def test_chrome_stays_open_while_a_chat_is_followed(monkeypatch):
+    bot = open_in_the_day(monkeypatch, watch_until=time.time() + 3600)
+    assert bot.session.stops == 0 and bot.state == "running"
+
+
+def test_chrome_stays_open_during_a_check(monkeypatch):
+    bot = open_in_the_day(monkeypatch, busy=1)
+    assert bot.session.stops == 0
+
+
+def test_chrome_stays_open_when_the_next_round_is_minutes_away(monkeypatch):
+    bot = open_in_the_day(monkeypatch, next_invites=time.time() + 300)
+    assert bot.session.stops == 0
+
+
+def test_chrome_closes_when_a_chat_ended(monkeypatch):
+    bot = open_in_the_day(monkeypatch, watch_until=time.time() - 1)
+    assert bot.session.stops == 1
+
+
+def ready_bot(monkeypatch, hours=True, **fields):
+    bot, _ = make_bot(monkeypatch, proxy="")
+    for name, value in fields.items():
+        setattr(bot, name, value)
+    monkeypatch.setattr(engine_module, "in_active_hours", lambda: hours)
+    calls = []
+
+    async def may_call():  # Lets ready() go round twice, then return.
+        calls.append(bot.session.open)
+        return len(calls) > 1
+
+    bot.may_call = may_call
+    asyncio.run(bot.ready())
+    return bot
+
+
+def test_ready_opens_chrome_for_a_check(monkeypatch):
+    bot = ready_bot(monkeypatch)
     assert bot.session.starts == 1 and bot.state == "running"
+
+
+def test_ready_never_opens_chrome_while_paused_backing_off_or_at_night(monkeypatch):
+    assert ready_bot(monkeypatch, paused=True).session.starts == 0
+    assert ready_bot(monkeypatch, backoff_until=time.time() + 600).session.starts == 0
+    assert ready_bot(monkeypatch, hours=False).session.starts == 0
 
 
 def test_lock_from_a_gone_container_is_removed(tmp_path):
@@ -159,3 +218,8 @@ def test_own_lock_is_left_alone(tmp_path):
 
 def test_no_lock_is_fine(tmp_path):
     assert not session_module.clear_stale_lock(tmp_path)
+
+
+def test_without_a_proxy_chrome_ignores_the_system_proxy():
+    assert "--no-proxy-server" in session_module.browser_args("", chromium=False)
+    assert "--no-proxy-server" not in session_module.browser_args("socks5://h:1", chromium=False)

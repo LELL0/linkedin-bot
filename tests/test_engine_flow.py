@@ -78,7 +78,7 @@ class FakeBrain:
         self.calls: list[list[str]] = []
         self.during_draft = None
 
-    async def reply(self, history, pending, self_id, sender, trace=None):
+    async def reply(self, history, pending, self_id, sender, trace=None, headline=""):
         self.calls.append([m.text for m in pending])
         if self.during_draft:
             action, self.during_draft = self.during_draft, None
@@ -104,13 +104,16 @@ def sim(tmp_path, monkeypatch):
         bot.brain = FakeBrain()
         bot.store = store or Store(tmp_path / "state.db")
         bot.scope = Scope(mode, now_ms(-3600), ME)
-        bot.session = SimpleNamespace(realtime_events=0)
+        bot.session = SimpleNamespace(realtime_events=0, open=True)
         bot.workers, bot.recheck, bot.seen_activity = {}, set(), {}
-        bot.hot_until, bot.last_ok, bot.trigger, bot.invite_trigger = 0.0, time.time(), "poll", "poll"
+        bot.last_ok, bot.checked_at, bot.trigger = time.time(), 0.0, "poll"
         bot.replies_sent = bot.accepted = 0
         bot.state = "running"
-        bot.recovering = asyncio.Lock()
+        bot.recovering, bot.opening = asyncio.Lock(), asyncio.Lock()
         bot.backoff_until, bot.failures, bot.last_check = 0.0, 0, 0.0
+        bot.poll_now, bot.invites_replan = asyncio.Event(), asyncio.Event()
+        bot.watch_until, bot.last_invites, bot.check_failed, bot.busy = 0.0, 0.0, False, 0
+        bot.next_check = bot.next_invites = 0.0
         bot.capped, bot.asleep = set(), False
         bot.catchup_since, bot.catchup_task, bot.catchup_progress = {}, None, None
         bot.paused = bot.replies_feed = False
