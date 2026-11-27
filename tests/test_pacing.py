@@ -29,24 +29,22 @@ def test_active_hours_plain_and_past_midnight(monkeypatch):
 
 
 def test_defaults_are_slow():
-    assert CONFIG.poll_s == (300.0, 900.0)
+    assert CONFIG.inbox_checks == 3  # a day, when no chat goes on
+    assert CONFIG.invite_rounds == 2
+    assert CONFIG.poll_s == (120.0, 600.0)  # while a chat goes on
+    assert CONFIG.watch_s == 2 * 3600
     assert CONFIG.min_check_gap_s >= 60
-    assert CONFIG.max_accepts_per_day == 0
+    assert CONFIG.reply_delay_s[0] >= 20
+    assert CONFIG.accept_gap_s[0] >= 20
+    assert CONFIG.max_replies_per_day <= 40
+    assert 0 < CONFIG.max_accepts_per_day <= 40
+    assert 0 < CONFIG.max_checks_per_day <= 80  # past it only the planned checks run
+    assert 0 < CONFIG.max_opens_per_day <= 24
 
 
 def _invite(urn, sent_at):
     return Invitation(urn=urn, invitation_id=urn, shared_secret="s", kind="CONNECTION",
                       sent_at=sent_at, inviter_id=f"p-{urn}", inviter_name="Sam")
-
-
-def test_invites_once_a_day_in_the_morning(monkeypatch):
-    _config(monkeypatch, invite_window=(9.0, 11.0))
-    day = datetime(2026, 1, 1)
-    at = engine_module.invite_time(day.date())
-    assert 9 <= at <= 11
-    assert not engine_module.invites_due("", day.replace(hour=8, minute=59))
-    assert engine_module.invites_due("", day.replace(hour=11, minute=30))
-    assert not engine_module.invites_due("2026-01-01", day.replace(hour=11, minute=30))
 
 
 def test_daily_round_accepts_every_pending_invite(sim, monkeypatch):  # noqa: F811

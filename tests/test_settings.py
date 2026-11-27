@@ -64,7 +64,7 @@ def test_show_round_trips():
         text = settings.show(name)
         assert " " not in text
         assert settings.parse(name, text) == getattr(CONFIG, settings.TUNABLES[name].field)
-    assert settings.show("poll") == "5-15m" and settings.show("check_gap") == "60s"
+    assert settings.show("poll") == "2-10m" and settings.show("check_gap") == "60s"
 
 
 @pytest.mark.parametrize("name, text, error", [
@@ -124,7 +124,7 @@ def control(monkeypatch):
     tg = enc.EncControl(engine)
     sent = []
 
-    async def send(text):
+    async def send(text, details=None):
         sent.append(text)
 
     tg.send = send
@@ -136,20 +136,20 @@ def test_enc_set_interval_reset(monkeypatch):
     asyncio.run(tg.handle("/interval 2-4"))
     assert CONFIG.poll_s == (120.0, 240.0)
     assert sent[-1] == ("✅ *LinkedIn · poll now 2-4m* · kept after restarts\n"
-                        "/reset poll goes back to 5-15m")
+                        "/reset poll goes back to 2-10m")
     asyncio.run(tg.handle("/set max_replies 30"))
     assert CONFIG.max_replies_per_day == 30 and store.meta["setting:max_replies"] == "30"
     assert sent[-1] == ("✅ *LinkedIn · max_replies now 30* · kept after restarts\n"
                         "/reset max_replies goes back to 40")
     asyncio.run(tg.handle("/settings"))
     assert sent[-1].startswith("ℹ️ *LinkedIn · settings* · 2 changed\n")
-    assert "\n*Inbox* poll *2-4m* · check_gap 60s · " in sent[-1]
-    assert "\n*Limits* max_replies *30* · " in sent[-1]
-    assert "\n*Mode* dry_run off · scope " in sent[-1]  # unchanged: plain
-    assert "\n*Defaults* poll 5-15m · max_replies 40\n" in sent[-1]
+    assert "\n*Inbox* checks 3 · watch 2h · poll *2-4m*\n" in sent[-1]
+    assert "\n*Replies* reply_delay 25-150s · max_replies *30* · " in sent[-1]
+    assert "\n*Mode* active_hours 8-24h · dry_run off · scope " in sent[-1]  # unchanged: plain
+    assert "\n*Defaults* poll 2-10m · max_replies 40\n" in sent[-1]
     asyncio.run(tg.handle("/set poll"))
-    assert sent[-1] == ("ℹ️ *LinkedIn · poll 2-4m* · random wait between inbox checks\n"
-                        "Default 5-15m · /set poll 2-4m changes it")
+    assert sent[-1] == ("ℹ️ *LinkedIn · poll 2-4m* · random wait between checks in a chat\n"
+                        "Default 2-10m · /set poll 2-4m changes it")
     asyncio.run(tg.handle("/set poll 15-5"))
     assert sent[-1] == "❌ *LinkedIn · poll not changed* · the first number is above the second"
     assert CONFIG.poll_s == (120.0, 240.0)
@@ -160,7 +160,7 @@ def test_enc_set_interval_reset(monkeypatch):
     asyncio.run(tg.handle("/set nope 1"))
     assert sent[-1] == "I don't know the setting nope · /settings lists them"
     asyncio.run(tg.handle("/reset poll"))
-    assert sent[-1] == "✅ *LinkedIn · poll back to 5-15m*"
+    assert sent[-1] == "✅ *LinkedIn · poll back to 2-10m*"
     asyncio.run(tg.handle("/set poll 2-4"))
     asyncio.run(tg.handle("/reset all"))
     assert CONFIG.poll_s == settings.DEFAULTS["poll"] and CONFIG.max_replies_per_day == 40
@@ -168,14 +168,19 @@ def test_enc_set_interval_reset(monkeypatch):
 
 
 def test_new_interval_cuts_a_long_wait_short(monkeypatch):
-    engine = SimpleNamespace(poll_now=None, last_check=time.time())
-    sleeper = engine_module.Engine.sleep_until_next_poll
+    """While a chat goes on, a new poll interval replaces the wait already going."""
+    engine = engine_module.Engine.__new__(engine_module.Engine)
+    engine.last_check, engine.check_failed = time.time() + 0.5, False
+    engine.watch_until = time.time() + 7200
+    engine.at_limit = lambda kind, limit: False
+    monkeypatch.setattr(settings.CONFIG, "active_hours", (0.0, 24.0))
 
     async def run():
         engine.poll_now = asyncio.Event()
         settings.apply("poll", (3600.0, 3600.0))
-        task = asyncio.create_task(sleeper(engine))
+        task = asyncio.create_task(engine.sleep_until_next_poll())
         await asyncio.sleep(0.05)
+        assert not task.done()
         monkeypatch.setattr(settings.CONFIG, "min_check_gap_s", 0.0)
         settings.apply("poll", (0.0, 0.0))
         engine.poll_now.set()

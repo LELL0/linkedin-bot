@@ -10,6 +10,7 @@ import time
 
 from . import enc
 from .config import CONFIG
+from .schedule import RETRY_S
 
 log = logging.getLogger(__name__)
 
@@ -17,10 +18,11 @@ STALE_STATUS_S = 180  # The bot rewrites the file every minute.
 
 
 def stale_poll_s() -> float:
-    """No successful LinkedIn check for this long means it is stuck. The bot waits up to
-    CONFIG.poll_s between checks on purpose (changeable from Enc Chat), so allow the longest
-    wait plus a check's time."""
-    return CONFIG.poll_s[1] + CONFIG.min_check_gap_s + 300
+    """No successful LinkedIn check for this long means it is stuck. Hours between planned
+    checks do not count: the bot keeps last_ok fresh while it waits on purpose after a good
+    check. What counts is the wait after a failed check (RETRY_S) or during a chat
+    (CONFIG.poll_s, changeable from Enc Chat), so allow the longest plus a check's time."""
+    return max(CONFIG.poll_s[1], RETRY_S[1]) + CONFIG.min_check_gap_s + 300
 
 
 ALERT_REPEAT_S = 3600
@@ -81,13 +83,27 @@ def alert(state: str, detail: str = "", icon: str = "🟡") -> None:
     if detail.strip():
         whole += "\n" + enc.inline(detail, 3000)
     short = enc.alert_text(state, detail, icon)
-    enc.notify(short, whole if whole.replace("\n", enc.DOT) != short else None)
+    # Details always: the alert uncut, and when it happened on the owner's clock.
+    enc.notify(short, whole + "\n" + enc.when_line(now))
     if shutil.which("notify-send"):
         subprocess.run(
             ["notify-send", "-u", "critical", "LinkedIn bot", text],
             check=False,
             capture_output=True,
         )
+
+
+SLEPT_S = 60.0
+
+
+def woke_at(wall: float, clock: float, wall_now: float, clock_now: float, woke: float) -> float:
+    """When the laptop last woke from sleep: now, if the wall clock moved more than SLEPT_S
+    past the monotonic clock (which stands still in sleep) since [wall]/[clock], else [woke].
+    A laptop that slept 15 minutes is not a stuck event loop (2026-11-26 20:22)."""
+    if (wall_now - wall) - (clock_now - clock) > SLEPT_S:
+        log.info("The machine slept for %ds", (wall_now - wall) - (clock_now - clock))
+        return wall_now
+    return woke
 
 
 def start_watchdog(get_status_time, limit_s: float = STALE_STATUS_S * 2) -> None:
@@ -97,9 +113,12 @@ def start_watchdog(get_status_time, limit_s: float = STALE_STATUS_S * 2) -> None
     """
 
     def watch() -> None:
+        woke = 0.0
         while True:
+            wall, clock = time.time(), time.monotonic()
             time.sleep(30)
-            stuck = time.time() - get_status_time()
+            woke = woke_at(wall, clock, time.time(), time.monotonic(), woke)
+            stuck = time.time() - max(get_status_time(), woke)
             if stuck > limit_s:
                 log.error("Event loop stuck for %ds, exiting for a restart", stuck)
                 logging.shutdown()

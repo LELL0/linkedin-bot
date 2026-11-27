@@ -32,14 +32,17 @@ class Tunable:
 
 
 TUNABLES: dict[str, Tunable] = {
-    "poll": Tunable("poll_s", "range", "min", "random wait between inbox checks", 1, 240),
+    "checks": Tunable("inbox_checks", "int", "", "inbox checks a day when no chat goes on",
+                      1, 24),
+    "watch": Tunable("watch_s", "number", "h", "time a chat is watched after it goes quiet",
+                     0.25, 12),
+    "poll": Tunable("poll_s", "range", "min", "random wait between checks in a chat", 1, 240),
     "check_gap": Tunable("min_check_gap_s", "number", "s", "shortest time between checks",
                          10, 3600),
     "reply_delay": Tunable("reply_delay_s", "range", "s", "random wait before a reply", 0, 3600),
     "active_hours": Tunable("active_hours", "range", "h", "hours it works, 8-2 runs past 0",
                             0, 24, wraps=True),
-    "invite_window": Tunable("invite_window", "range", "h", "hours of the daily accept round",
-                             0, 24),
+    "invites": Tunable("invite_rounds", "int", "", "invitation rounds a day", 1, 6),
     "accept_gap": Tunable("accept_gap_s", "range", "s", "random pause between accepts", 0, 3600),
     "catchup_gap": Tunable("catchup_gap_s", "range", "min", "pause between /catchup answers",
                            0, 240),

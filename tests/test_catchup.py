@@ -12,7 +12,7 @@ DAY = 86400
 def run(bot, days):
     reports = []
 
-    async def report(text):
+    async def report(text, details=None):
         reports.append(text)
 
     async def go():
@@ -86,7 +86,7 @@ def test_stop_reports_the_progress_and_the_catchup_says_nothing_more(sim, monkey
     reports = []
     answer = bot.answer_thread
 
-    async def report(text):
+    async def report(text, details=None):
         reports.append(text)
 
     async def go():

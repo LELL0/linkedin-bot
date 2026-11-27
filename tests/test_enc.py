@@ -185,7 +185,8 @@ def control(monkeypatch):
     """A control whose send() records the text instead of reaching an agent."""
     monkeypatch.setenv("ENC_BOT_SECRET", "s")
     monkeypatch.setenv("ENC_OWNER", OWNER)
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=1, replies_sent=2, store=MemoryStore())
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     engine.set_replies_feed = lambda on: setattr(engine, "replies_feed", on)
@@ -219,14 +220,19 @@ def test_pause_resume_and_replies_toggle(monkeypatch):
     asyncio.run(ec.handle("/status"))
     lines = sent[-1].split("\n")  # Enc Chat marks, never HTML
     assert lines[0] == "🟢 *LinkedIn · running* · no check yet"
-    assert lines[1].startswith("*Inbox* every ")
+    assert lines[1] == "*Inbox* 3 a day · hours 8-24h"
     assert lines[2] == "*Since start* 1 accept · 2 replies"
     assert lines[3] == "*In this chat* replies off · log off"
     assert "<b>" not in sent[-1]
     assert_style(sent[-1], 4)
-    engine.last_ok = time.time() - 300
+    engine.checked_at = time.time() - 300
     asyncio.run(ec.handle("/status"))
     assert sent[-1].startswith("🟢 *LinkedIn · running* · checked 5m ago\n")
+    engine.watch_until, engine.next_check = time.time() + 3600, time.time() + 300
+    asyncio.run(ec.handle("/status"))
+    assert re.fullmatch(r"\*Inbox\* chat on, every 2-10m · next \d\d:\d\d · hours 8-24h",
+                        sent[-1].split("\n")[1])
+    assert_style(sent[-1], 4)
 
 
 def test_pause_and_resume_say_when_nothing_changes(monkeypatch):
@@ -240,7 +246,7 @@ def test_pause_and_resume_say_when_nothing_changes(monkeypatch):
     assert sent[-1] == "ℹ️ *LinkedIn · already paused* · /resume starts it again"
     asyncio.run(ec.handle("/status"))
     assert sent[-1].startswith("🟡 *LinkedIn · paused* · /resume starts it again\n"
-                               "*Inbox* no check yet · every ")
+                               "*Inbox* no check yet · 3 a day · hours ")
 
 
 @pytest.mark.parametrize("state, first", [
@@ -440,7 +446,9 @@ def test_send_posts_to_the_owner_with_the_secret(agent):
     engine = SimpleNamespace(verbose=0)
     ec = enc.EncControl(engine)
     asyncio.run(ec.send("*hello*"))
-    assert agent.sent == [{"to": "owner", "text": "*hello*"}]
+    assert [(m["to"], m["text"]) for m in agent.sent] == [("owner", "*hello*")]
+    # Every message has Details: without its own, the bot's whole status.
+    assert agent.sent[0]["details"].startswith("ℹ️ *LinkedIn · status in full* · ")
     assert "parse_mode" not in agent.sent[0] and "silent" not in agent.sent[0]
     agent.refuse_with = "BOT_NOT_STARTED"
     asyncio.run(ec.send("again"))  # a refusal is logged, never raised
@@ -458,7 +466,8 @@ def test_alerts_go_through_enc_chat(agent):
 def test_stream_commands_reach_the_engine_and_commands_are_registered(agent, monkeypatch):
     agent.events = [command(1, "pause"), command(2, "pause", sender="u2", username="x"),
                     command(3, "status")]
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=0, replies_sent=0, store=MemoryStore())
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     ec = enc.EncControl(engine)
@@ -652,7 +661,8 @@ def test_catchup_command_checks_days_and_stop(monkeypatch):
 
 
 def test_commands_reach_enc_chat_through_the_agent(agent, monkeypatch):
-    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0,
+    engine = SimpleNamespace(paused=False, replies_feed=False, state="running", last_ok=0, checked_at=0,
+                             watch_until=0, next_check=0,
                              accepted=0, replies_sent=0, verbose=0)
     engine.set_paused = lambda on: setattr(engine, "paused", on)
     ec = enc.EncControl(engine)
@@ -662,7 +672,7 @@ def test_commands_reach_enc_chat_through_the_agent(agent, monkeypatch):
     assert enc_texts[0] == enc.HELP
     assert enc_texts[1].startswith("🟢 *LinkedIn · running* · ")
     assert enc_texts[2].startswith("ℹ️ *LinkedIn · settings* · ")
-    assert "\n*Inbox* poll " in enc_texts[2]
+    assert "\n*Inbox* checks 3 · watch 2h · poll " in enc_texts[2]
     assert enc_texts[3].startswith("✅ *LinkedIn · paused*")
     enc.logging.getLogger().removeHandler(ec.verbose_log)
 
@@ -723,7 +733,7 @@ def test_set_answers_explain_and_warn(monkeypatch):
                             "/set dry_run off ends it")
         asyncio.run(ec.handle("/settings"))
         assert sent[-1].startswith("🟡 *LinkedIn · settings* · 1 changed\n")
-        assert "\n*Mode* dry_run *on* · scope " in sent[-1]
+        assert "\n*Mode* active_hours 8-24h · dry_run *on* · scope " in sent[-1]
         assert "\n*Defaults* dry_run off\n" in sent[-1]
         asyncio.run(ec.handle("/set scope all"))
         assert sent[-1].startswith("🟡 *LinkedIn · scope all* · may answer chats you started")
@@ -746,7 +756,7 @@ def test_settings_lists_every_setting_grouped():
     lines = text.split("\n")
     assert lines[0] == "ℹ️ *LinkedIn · settings* · all default"
     assert [line.split(" ")[0] for line in lines[1:-1]] == [
-        "*Inbox*", "*Pauses*", "*Hours*", "*Limits*", "*Back-off*", "*Mode*"]
+        "*Inbox*", "*Replies*", "*Invites*", "*Back-off*", "*Mode*"]
     assert lines[-1] == "/set name explains · /set name value changes · /reset name undoes"
     assert_style(text, 8)
 
@@ -932,7 +942,8 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     answers = iter(["proxy 172.17.0.1:1080 does not answer (ConnectionRefusedError)", ""])
     monkeypatch.setattr(engine_module, "proxy_problem", lambda proxy: next(answers))
     bot = SimpleNamespace(idle=nothing, session=SimpleNamespace(start=nothing),
-                          wait_for_session=nothing)
+                          wait_for_session=nothing, at_limit=lambda *a: False,
+                          count=lambda kind: None)
     asyncio.run(engine_module.Engine.wake(bot))
 
     cookies = iter([False, True])
@@ -944,8 +955,9 @@ def test_engine_alerts_fit_one_line(monkeypatch):
                           write_status=lambda: None)
     asyncio.run(engine_module.Engine.wait_for_session(bot))
     engine_module.Engine.push_back(SimpleNamespace(failures=1, backoff_until=0), "HTTP 429")
-    engine_module.Engine.at_limit(SimpleNamespace(today=lambda kind: 40, capped=set()),
-                                  "replies", 40)
+    for kind in ("replies", "checks", "opens"):
+        engine_module.Engine.at_limit(SimpleNamespace(today=lambda kind: 40, capped=set(),
+                                                      day=engine_module.Engine.day), kind, 40)
     monkeypatch.setattr(engine_module.os, "_exit", lambda code: None)
     monkeypatch.setattr(engine_module.logging, "shutdown", lambda: None)
     engine_module.Engine.on_browser_closed(SimpleNamespace(), "Bot tab closed")
@@ -969,7 +981,8 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     with pytest.raises(RuntimeError):
         asyncio.run(engine_module.Engine.send(bot, SimpleNamespace(urn="t"), "hi", [], {}))
     assert [text.split(" · ")[1].removesuffix("*") for text in sent] == [
-        "home tunnel down", "sign-in needed", "on hold", "daily reply limit", "restarting",
+        "home tunnel down", "sign-in needed", "on hold", "daily reply limit",
+        "daily check limit", "daily open limit", "restarting",
         "accept failed", "reply not sent"]
     assert sent[0] == "🔴 *LinkedIn · home tunnel down* · start it so LinkedIn can open"
     assert re.fullmatch(r"🟡 \*LinkedIn · on hold\* · LinkedIn pushed back · back in 1[0-3]m",
@@ -977,3 +990,60 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     for text in sent:
         assert "…" not in text, text  # nothing was cut to fit
         assert_style(text, 1)
+
+
+def test_every_message_has_details(monkeypatch, tmp_path):
+    """Every message the bot sends carries Details (SDK 0.6.0), never a copy of its text:
+    the answers to every command, the reply feed, the catch-up plan and the alerts."""
+    import dataclasses
+
+    from bot import settings
+
+    ec, engine, _ = control(monkeypatch)
+    del ec.send  # the real send, to a bot that records what reaches the agent
+    payloads: list[tuple[str, str | None]] = []
+    ec.bot = SimpleNamespace(send=lambda text, details=None: payloads.append((text, details)))
+    engine.verbose = 0
+    engine.today = lambda kind: 3
+    engine.set_verbose = lambda level: setattr(engine, "verbose", level)
+    engine.change_setting = lambda name, value: (settings.reset(name) if value is None
+                                                 else settings.apply(name, value))
+    going = []
+    engine.start_catchup = lambda days, report: not going and (going.append(days) or True)
+    engine.stop_catchup = lambda: (going.clear() or (1, 3)) if going else None
+    monkeypatch.setattr(enc, "CONFIG", dataclasses.replace(enc.CONFIG,
+                                                           metrics_path=tmp_path / "none.jsonl"))
+    try:
+        for text, _budget in EVERY_COMMAND:
+            asyncio.run(ec.handle(text))
+        asyncio.run(ec.on_event({"type": "message", "id": "m1", "from": {"id": OWNER}}))
+        engine.replies_feed = True
+        for count in (1, 3):
+            for number in range(count):
+                asyncio.run(ec.reply_sent(f"Person {number}", ["hi there"], "hey, good to hear"))
+            asyncio.run(ec.flush_feed(force=True))
+        asyncio.run(ec.send(enc.catchup_text(["Ann", "Bob"], 3, (90, 300)),
+                            enc.catchup_details(["Ann", "Bob"], 3, (90, 300))))
+    finally:
+        for name in settings.TUNABLES:
+            settings.reset(name)
+        enc.logging.getLogger().removeHandler(ec.verbose_log)
+        enc.apply_log_level(0)
+    assert len(payloads) == len(EVERY_COMMAND) + 1 + 2 + 1
+    for text, details in payloads:
+        assert details and details != text, text
+        assert details.split("\n")[0].startswith(tuple(enc.TITLE_EMOJI)) or \
+            details.startswith("/"), details
+        assert len(details) <= enc.MAX_MESSAGE
+    by_text = dict(payloads)
+    assert "*Today* 3/80 checks · 3/24 opens · 3/40 replies · 3/40 accepts" in \
+        by_text[next(t for t, _ in payloads if t.startswith("🟢 *LinkedIn · running*"))]
+    assert "/catchup 1-30 · answers unanswered" in by_text[enc.HELP]
+    assert "2. Bob" in payloads[-1][1]
+
+    alerts = []
+    monkeypatch.setattr(health.enc, "notify", lambda text, details=None: alerts.append(details))
+    monkeypatch.setattr(health.shutil, "which", lambda name: None)
+    health._last_sent.clear()
+    health.alert("sign-in needed", "sign in again over VNC", "🔴")
+    assert alerts[0].startswith("🔴 *LinkedIn · sign-in needed*\nsign in again over VNC\n*Sent* ")
