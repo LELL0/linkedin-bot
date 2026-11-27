@@ -708,7 +708,9 @@ class Engine:
             trace["redrafts"] += 1
             others = [p for p in thread.participants if p != self.scope.self_id]
             sender = thread.names.get(others[0], "") if others else ""
-            reply = await self.brain.reply(history, pending, self.scope.self_id, sender, trace)
+            headline = thread.headlines.get(others[0], "") if others else ""
+            reply = await self.brain.reply(history, pending, self.scope.self_id, sender, trace,
+                                           headline)
             history, latest = await self.pending_for(thread)
             if not latest:
                 return  # Recalled, or answered by hand in the meantime.

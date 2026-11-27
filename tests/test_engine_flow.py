@@ -78,7 +78,7 @@ class FakeBrain:
         self.calls: list[list[str]] = []
         self.during_draft = None
 
-    async def reply(self, history, pending, self_id, sender, trace=None):
+    async def reply(self, history, pending, self_id, sender, trace=None, headline=""):
         self.calls.append([m.text for m in pending])
         if self.during_draft:
             action, self.during_draft = self.during_draft, None
