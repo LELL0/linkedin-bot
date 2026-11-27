@@ -152,3 +152,76 @@ def test_a_long_draft_is_asked_for_once_more_shorter():
 
     drafts = iter([long, long + " and more"])  # The second try is no shorter: keep the first.
     assert asyncio.run(brain.reply(PENDING, PENDING, ME, "Sam")) == long.rstrip(".")
+
+
+# The owner's real link shapes: a portfolio root, a CV under it, a GitHub account path.
+REAL = ("Portfolio: https://owner-site.vercel.app\nCV: https://owner-site.vercel.app/Owner-CV.pdf\n"
+        "GitHub: https://github.com/owner0\n")
+
+
+def test_the_owners_real_link_shapes_stay_allowed():
+    allowed = owner_links(REAL)
+    for link in ("https://github.com/OWNER0", "github.com/owner0/linkedin-bot", "github.com/owner0/",
+                 "https://www.github.com/owner0", "https://github.com/owner0?tab=repositories",
+                 "https://owner-site.vercel.app/Owner-CV.pdf", "owner-site.vercel.app",
+                 "https://owner-site.vercel.app/projects#top", "http://owner-site.vercel.app/Owner-CV.pdf",
+                 "github.com/owner0).", "https://owner-site.vercel.app/Owner-CV.pdf,"):
+        assert allowed_link(link, allowed), link
+
+
+@pytest.mark.parametrize("link", [
+    # Dot segments, raw or encoded, walk out of the owner's path.
+    "https://github.com/owner0/../attacker/repo",
+    "github.com/owner0/../attacker",
+    "https://github.com/owner0/./../attacker",
+    "https://github.com/owner0/%2e%2e/attacker",
+    "https://github.com/owner0/%2E%2E%2Fattacker",
+    "https://github.com/owner0/..%2fattacker",
+    "https://github.com/owner0/%252e%252e/attacker",
+    "https://github.com/owner0\\..\\attacker",
+    "https://github.com/owner0%2f..%2fattacker",
+    # Not a plain https address on the owner's host.
+    "https://github.com:8443/owner0",
+    "https://someone@github.com/owner0",
+    "https://github.com@evil.com/owner0",
+    "ftp://github.com/owner0",
+    "javascript:alert(1)//github.com/owner0",
+    "https://x.github.com/owner0",
+    "https://evil-github.com/owner0",
+    "https://github.com.evil.com/owner0",
+    "https://github.com/owner0x",
+    "https://owner-site.vercel.app.evil.com/Owner-CV.pdf",
+    "https://evil.com\\@github.com/owner0",
+    "https://evil.com\\github.com/owner0",
+])
+def test_lookalikes_and_escapes_are_not_the_owners(link):
+    assert not allowed_link(link, owner_links(REAL)), link
+
+
+@pytest.mark.parametrize("reply", [
+    "my code is on x.github.com/owner0",           # Bare host inside a longer host.
+    "see evil-github.com/owner0",
+    "see foo_bar.evil.com/x",                      # An underscore label must not hide the host.
+    "see evil_github.com/owner0",
+    "it is all on evil.app/x",                     # Bare hosts on TLDs the old list missed.
+    "try evil.dev for that",
+    "ask evil.ai",
+    "join evil.gg tonight",
+    "details at evil.site/login",
+    "grab it from evil.link",
+    "files at evil.storage/x",                     # Any TLD when a path follows.
+    "https://github.com/owner0/../attacker/repo",
+])
+def test_a_reply_cannot_slip_a_foreign_link_past_the_owners(reply):
+    assert output_problem(reply, "Them: hi", owner_links(REAL)) == "new_contact_or_link", reply
+
+
+@pytest.mark.parametrize("reply", [
+    "I mostly work with Node.js, Vue.js and Python 3.12 these days",
+    "small things, e.g. dashboards, i.e. faster triage",
+    "we moved from v1.2.3 to 2.0 last month",
+    "my CV is the Owner-CV.pdf on my site: https://owner-site.vercel.app/Owner-CV.pdf",
+    "code is on github.com/owner0, have a look",
+])
+def test_ordinary_words_and_own_links_are_not_flagged(reply):
+    assert output_problem(reply, "Them: hi", owner_links(REAL)) is None, reply
