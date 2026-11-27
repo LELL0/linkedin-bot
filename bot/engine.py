@@ -19,7 +19,8 @@ from .linkedin import INBOX_CATEGORIES, MESSAGE_PAGE, AuthError, LinkedIn
 from .models import Message, Thread
 from .session import Session, proxy_problem
 from .store import Store
-from .enc import EncControl, catchup_limit_text, catchup_text, days_text, duration, title
+from .enc import (EncControl, catchup_details, catchup_limit_text, catchup_text, days_text,
+                  duration, title)
 
 log = logging.getLogger(__name__)
 
@@ -489,7 +490,8 @@ class Engine:
                 return
             names = [next(iter(t.names.values()), "?") for t in threads]
             low, high = CONFIG.catchup_gap_s
-            await report(catchup_text(names, days, (low, high)))
+            await report(catchup_text(names, days, (low, high)),
+                         catchup_details(names, days, (low, high)))
             answered = 0
             self.catchup_progress = (answered, len(threads))
             for number, thread in enumerate(threads):

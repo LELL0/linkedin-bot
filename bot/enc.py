@@ -94,6 +94,27 @@ COMMANDS = [
 ]
 # Names that still work but are not listed: /start opens the chat, /interval is /set poll.
 HIDDEN = ("start", "interval")
+# What /help's Details says about each command, beyond its one line.
+HELP_MORE = {
+    "status": "state, last and next inbox check, next invitation round, today's counts "
+              "against the daily limits",
+    "pause": "no checks, accepts or replies until /resume; messages wait and are answered "
+             "then, unless you answer first",
+    "resume": "back to the plan: a few checks a day, every few minutes while a chat goes on",
+    "stats": "accepts and replies a day for the last days, how long each takes, who wrote "
+             "the replies",
+    "replies": "each answered chat comes here, what they wrote and the reply, at most one "
+               "message every 10 minutes",
+    "catchup": "answers unanswered one-to-one chats of the last 1-30 days, one at a time "
+               "with a pause; /catchup stop ends it",
+    "verbose": "0 only alerts, 1 warnings, 2 also accepts and replies, 3 all but the "
+               "heartbeat, 4 with the heartbeat, 5 debug too",
+    "settings": "every timing and limit, changed ones in bold, their defaults",
+    "set": "/set name says what it is and its default; /set name value changes it, kept "
+           "after restarts",
+    "reset": "/reset name puts one back to its default, /reset all every one",
+    "help": "this list; Details has more on each command",
+}
 
 
 def help_line(name: str, argument: str, description: str) -> str:
@@ -278,6 +299,64 @@ def verbose_help(current: int) -> str:
     every = VERBOSE_LEVELS[current][2]
     how = "/verbose 0-5 changes it" + (f" · sent every {duration(every)}" if every else "")
     return "\n".join([level_title("ℹ️", current), *levels_lines(), how])
+
+
+def verbose_levels_details(current: int) -> str:
+    """Details of /verbose: each level in full words, how often its log comes, the current
+    one marked."""
+    lines = [title("ℹ️", "log levels", f"now {current}")]
+    for level, (text, _short, every) in VERBOSE_LEVELS.items():
+        often = f"every {duration(every)}" if every else "alerts only"
+        mark = " ← now" if level == current else ""
+        lines.append(f"*{level}* {text}{DOT}{often}{mark}")
+    lines += ["Alerts (sign-in, limits, failures) come at every level",
+              "Each log message shows the newest lines; Details has the rest"]
+    return "\n".join(lines)
+
+
+def clock(at: float, now: float | None = None) -> str:
+    """A moment on the owner's clock: 18:40 today, Tue 18:40 another day."""
+    now = time.time() if now is None else now
+    moment = owner_time(at)
+    return f"{moment:%H:%M}" if moment.date() == owner_time(now).date() else f"{moment:%a %H:%M}"
+
+
+def when_line(now: float | None = None) -> str:
+    now = time.time() if now is None else now
+    return f"*Sent* {owner_time(now):%a %d %b %H:%M} (Beirut)"
+
+
+def limits_line() -> str:
+    accepts = CONFIG.max_accepts_per_day or "no limit on"
+    return (f"*Daily limits* {CONFIG.max_replies_per_day} replies{DOT}{accepts} accepts{DOT}"
+            f"{CONFIG.max_checks_per_day or 'no limit on'} checks{DOT}"
+            f"{CONFIG.max_opens_per_day or 'no limit on'} LinkedIn opens")
+
+
+def help_details() -> str:
+    """Details of /help: every command in full, the plan and the limits."""
+    lines = [title("ℹ️", "help", "every command in full")]
+    lines += [f"/{name}{' ' + argument if argument else ''}{DOT}{HELP_MORE.get(name, text)}"
+              for name, argument, text in COMMANDS]
+    lines += [
+        f"*Plan* {settings.show('checks')} inbox checks a day in {settings.show('active_hours')}, "
+        f"every {settings.show('poll')} while a chat goes on, until {settings.show('watch')} "
+        f"after it goes quiet; {settings.show('invites')} invitation rounds a day",
+        limits_line(),
+        "It never writes first and never sends invites; nothing happens at night",
+    ]
+    return "\n".join(lines)
+
+
+def catchup_details(names: list[str], days: float, gap: tuple[float, float]) -> str:
+    """Details of a catch-up's plan: every name in answer order, the pace and the rules."""
+    lines = [title("⏳", f"catch-up, {len(names)} to answer", f"last {days_text(days)}")]
+    lines += [f"{number}. {inline(name, 60) or '?'}" for number, name in enumerate(names, 1)]
+    lines += [f"*Pace* one every {minutes_range(*gap)}, only in the active hours "
+              f"{settings.show('active_hours')}",
+              f"*Stops* at the daily reply limit ({CONFIG.max_replies_per_day}) or /catchup stop",
+              "Group chats, company pages and spam are left alone"]
+    return "\n".join(lines)
 
 
 def alert_text(state: str, detail: str = "", emoji: str = "🟡") -> str:
@@ -515,6 +594,53 @@ def stats_text(entries: list[dict], now: float | None = None) -> str:
     return "\n".join(line for line in lines if line)
 
 
+OUTCOMES = {
+    "draft_sent": "written by the AI",
+    "no_draft": "AI down, a holding line sent",
+    "no_verdict": "check down, a holding line sent",
+    "question_blocked": "unsafe ask, a polite no",
+    "draft_blocked": "unsafe draft, a polite no",
+}
+
+
+def stats_details(entries: list[dict], now: float | None = None, days: int = 14) -> str:
+    """Details of /stats: every day of the last [days] with any, how each reply was written,
+    which AI model, and each timing typical and 95% within."""
+    now = time.time() if now is None else now
+    accepts = [e for e in entries if e.get("kind") == "accept"]
+    replies = [e for e in entries if e.get("kind") == "reply"]
+    lines = [title("ℹ️", "stats in full", f"{plural(len(accepts), 'accept')} · "
+                                           f"{plural(len(replies), 'reply', 'replies')}")]
+    today = owner_time(now).date()
+    counts: dict[date, list[int]] = {}
+    for entry in accepts + replies:
+        at = entry.get("at")
+        if isinstance(at, (int, float)):
+            day = owner_time(at).date()
+            if (today - day).days < days:
+                counts.setdefault(day, [0, 0])[entry.get("kind") == "reply"] += 1
+    for day in sorted(counts, reverse=True):
+        a, r = counts[day]
+        name = "today" if day == today else f"{WEEKDAYS[day.weekday()]} {day:%d %b}"
+        lines.append(f"*{name}* {plural(a, 'accept')}{DOT}{plural(r, 'reply', 'replies')}")
+    if not counts:
+        lines.append(f"Nothing in the last {days_text(days)}")
+    outcomes = collections.Counter(e.get("outcome") or "unknown" for e in replies)
+    if outcomes:
+        lines.append("*Replies* " + DOT.join(
+            f"{n} {OUTCOMES.get(k, k.replace('_', ' '))}" for k, n in outcomes.most_common()))
+    models = collections.Counter(e.get("model") for e in replies if e.get("model"))
+    if models:
+        lines.append("*Models* " + DOT.join(f"{n} {inline(k, 40)}" for k, n in
+                                             models.most_common()))
+    for name, kind, field in TIMINGS:
+        facts = typical(accepts if kind == "accept" else replies, field)
+        if facts:
+            lines.append(f"*{name.lstrip('- ')}* " + DOT.join(facts))
+    lines.append(limits_line())
+    return "\n".join(lines)
+
+
 def example(name: str) -> str:
     """A value to show in "/set name value": the current one, or the other choice."""
     tunable = settings.TUNABLES[name]
@@ -588,9 +714,12 @@ class EncControl:
         return self.bot is not None
 
     async def send(self, text: str, details: str | None = None) -> None:
-        """[text] to the owner on Enc Chat, [details] behind its Details button. A refusal is
+        """[text] to the owner on Enc Chat, [details] behind its Details button. Every message
+        has Details: without [details], the bot's whole status right now. A refusal is
         logged, never raised."""
         text = text[:MAX_MESSAGE]
+        if not details or details == text:
+            details = self.status_details()
         if self.bot is not None:
             try:
                 await asyncio.to_thread(self.bot.send, text, details=details[:MAX_MESSAGE] if details else None)
@@ -673,10 +802,10 @@ class EncControl:
         if not self.is_owner(event.get("from") or {}):
             return  # Only the owner; strangers get nothing.
         if kind == "started":
-            await self.send(HELP)
+            await self.send(HELP, help_details())
             return
         if kind == "message":
-            await self.send("I only take commands · /help lists them")
+            await self.send("I only take commands · /help lists them", help_details())
             return
         args = event.get("args") or ""
         if isinstance(args, (list, tuple)):
@@ -703,11 +832,12 @@ class EncControl:
     async def set_verbose(self, argument: str) -> None:
         current = self.verbose
         if not argument:
-            await self.send(verbose_help(current))
+            await self.send(verbose_help(current), verbose_levels_details(current))
             return
         word = {"off": "0", "on": "3"}.get(argument, argument)
         if not (word.isdigit() and int(word) in VERBOSE_LEVELS):
-            await self.send(f"Use /verbose 0-5 · it stays at {current}")
+            await self.send(f"Use /verbose 0-5 · it stays at {current}",
+                            verbose_levels_details(current))
             return
         level = int(word)
         self.engine.set_verbose(level)
@@ -717,7 +847,7 @@ class EncControl:
         text = level_title("✅", level)
         if level:
             text += f"\nSent every {duration(every)} · /verbose 0 stops it"
-        await self.send(text)
+        await self.send(text, verbose_levels_details(level))
 
     async def handle(self, text: str) -> None:
         if not text.startswith("/"):
@@ -729,18 +859,20 @@ class EncControl:
         argument = words[1].lower() if len(words) > 1 else ""
         engine = self.engine
         if command in ("/start", "/help"):
-            await self.send(HELP)
+            await self.send(HELP, help_details())
         elif command == "/status":
-            await self.send(self.status_text())
+            await self.send(self.status_text(), self.status_details())
         elif command == "/stats":
-            await self.send(stats_text(metrics.load(CONFIG.metrics_path)))
+            entries = metrics.load(CONFIG.metrics_path)
+            await self.send(stats_text(entries), stats_details(entries))
         elif command == "/pause":
             await self.pause(True)
         elif command == "/resume":
             await self.pause(False)
         elif command == "/replies":
             if argument not in ("", "on", "off"):
-                await self.send("Use /replies on or /replies off")
+                await self.send("Use /replies on or /replies off",
+                                "/replies on" + DOT + HELP_MORE["replies"])
                 return
             on = argument == "on" if argument else not engine.replies_feed
             engine.set_replies_feed(on)
@@ -751,13 +883,14 @@ class EncControl:
         elif command == "/catchup":
             await self.catchup(argument)
         elif command == "/settings":
-            await self.send(self.settings_text())
+            await self.send(self.settings_text(), self.settings_details())
         elif command == "/set":
             await self.set_setting(argument, " ".join(words[2:]))
         elif command == "/reset":
             await self.reset_setting(argument)
         else:
-            await self.send(f"I don't know {inline(command, 30)} · /help lists what I can do")
+            await self.send(f"I don't know {inline(command, 30)} · /help lists what I can do",
+                            help_details())
 
     async def pause(self, paused: bool) -> None:
         engine = self.engine
@@ -791,7 +924,8 @@ class EncControl:
         except ValueError:
             days = 0
         if not 0 < days <= 30:
-            await self.send("Use /catchup 1-30 (days back) or /catchup stop")
+            await self.send("Use /catchup 1-30 (days back) or /catchup stop",
+                            "/catchup 1-30" + DOT + HELP_MORE["catchup"])
             return
         if engine.start_catchup(days, self.send):
             await self.send(title("⏳", "catch-up", f"looking back {days_text(days)}…"))
@@ -821,14 +955,53 @@ class EncControl:
         how = "/set name explains · /set name value changes · /reset name undoes"
         return "\n".join([head, *lines, how])
 
+    @staticmethod
+    def setting_line(name: str) -> str:
+        """One setting in full: value, what it is, default, what may be typed."""
+        tunable = settings.TUNABLES[name]
+        default = settings.show(name, settings.DEFAULTS[name])
+        if tunable.kind == "bool":
+            allowed = "on or off"
+        elif tunable.kind == "choice":
+            allowed = " or ".join(tunable.choices)
+        else:
+            unit = settings.UNIT_SHOWN.get(tunable.unit, "")
+            low, high = (f"{v:g}" for v in (tunable.low, tunable.high))
+            allowed = f"{low}-{high}{unit}" + (" each end" if tunable.kind == "range" else "")
+        mark = f"*{settings.show(name)}*" if changed(name) else settings.show(name)
+        return f"*{name}* {mark}{DOT}{tunable.help}{DOT}default {default}{DOT}{allowed}"
+
+    @classmethod
+    def setting_details(cls, name: str, note: str = "") -> str:
+        """Details of a /set or /reset answer: the setting in full, what changed or went
+        wrong ([note]), how to change it again."""
+        return "\n".join(line for line in [
+            title("ℹ️", f"{name} in full", settings.show(name)),
+            note,
+            cls.setting_line(name),
+            f"/set {name} {example(name)} changes it · /reset {name} undoes",
+        ] if line)
+
+    @classmethod
+    def settings_details(cls) -> str:
+        """Details of /settings: every setting in full, then the fixed daily limits."""
+        lines = [title("ℹ️", "settings in full", "what each one does")]
+        lines += [cls.setting_line(name) for name in settings.TUNABLES]
+        lines += [f"*Fixed* {CONFIG.max_checks_per_day or 'no limit on'} checks and "
+                  f"{CONFIG.max_opens_per_day or 'no limit on'} LinkedIn opens a day "
+                  "(MAX_CHECKS_PER_DAY, MAX_OPENS_PER_DAY)",
+                  "/set name value changes one, kept after restarts · /reset name undoes"]
+        return "\n".join(lines)
+
     async def set_setting(self, name: str, value: str) -> None:
         name = name.replace("-", "_")
         if not name:
-            await self.send("Use /set name value · /settings lists the names")
+            await self.send("Use /set name value · /settings lists the names",
+                            self.settings_details())
             return
         if name not in settings.TUNABLES:
             await self.send(f"I don't know the setting {inline(name, 30)} · "
-                            "/settings lists them")
+                            "/settings lists them", self.settings_details())
             return
         tunable = settings.TUNABLES[name]
         default = settings.show(name, settings.DEFAULTS[name])
@@ -836,14 +1009,17 @@ class EncControl:
             await self.send("\n".join([
                 title("ℹ️", f"{name} {settings.show(name)}", tunable.help),
                 f"Default {default} · /set {name} {example(name)} changes it",
-            ]))
+            ]), self.setting_details(name))
             return
+        before = settings.show(name)
         try:
             parsed = settings.parse(name, value)
             self.engine.change_setting(name, parsed)
         except ValueError as error:  # it may quote what the owner typed
-            await self.send(alert_text(f"{name} not changed", str(error), "❌"))
+            await self.send(alert_text(f"{name} not changed", str(error), "❌"),
+                            self.setting_details(name, inline(str(error), 300)))
             return
+        changed_text = f"*Was* {before}{DOT}*now* {settings.show(name)}"
         if name == "dry_run" and parsed:
             text = [title("🟡", "dry run on", "nothing is sent or accepted"),
                     "/set dry_run off ends it"]
@@ -854,27 +1030,34 @@ class EncControl:
             text = [title("✅", f"{name} now {settings.show(name)}", "kept after restarts")]
             if changed(name):
                 text.append(f"/reset {name} goes back to {default}")
-        await self.send("\n".join(text))
+        await self.send("\n".join(text), self.setting_details(name, changed_text))
 
     async def reset_setting(self, name: str) -> None:
         if not name:
-            await self.send("Use /reset name or /reset all · /settings lists the names")
+            await self.send("Use /reset name or /reset all · /settings lists the names",
+                            self.settings_details())
             return
         names = list(settings.TUNABLES) if name == "all" else [name.replace("-", "_")]
         if names[0] not in settings.TUNABLES:
             await self.send(f"I don't know the setting {inline(name, 30)} · "
-                            "/settings lists them")
+                            "/settings lists them", self.settings_details())
             return
         moved = [n for n in names if changed(n)]
+        was = {n: settings.show(n) for n in names}
         for n in names:
             self.engine.change_setting(n, None)
+        details = "\n".join([title("✅", "reset in full", plural(len(moved), "setting") + " moved"),
+                             *(f"*{n}* {was[n]} → {settings.show(n)}" for n in moved),
+                             *([] if moved else ["Nothing had changed"]),
+                             "/settings lists them all"])
         if name == "all":
             fact = ("none had changed" if not moved
                     else f"{', '.join(moved)} had changed" if len(moved) <= 3
                     else f"{len(moved)} had changed")
-            await self.send(title("✅", "all settings default", fact))
+            await self.send(title("✅", "all settings default", fact), details)
         else:
-            await self.send(title("✅", f"{names[0]} back to {settings.show(names[0])}"))
+            await self.send(title("✅", f"{names[0]} back to {settings.show(names[0])}"),
+                            self.setting_details(names[0], f"*Was* {was[names[0]]}"))
 
     def status_text(self) -> str:
         """/status: the state and what to do about it first, then the inbox, the counts since
@@ -905,6 +1088,51 @@ class EncControl:
         ]
         return "\n".join(line for line in lines if line)
 
+    def status_details(self) -> str:
+        """Details of /status (and of any message without its own): the state, last and next
+        check and invitation round, a chat being followed, a push-back, today's counts
+        against the daily limits, the settings that matter most."""
+        engine = self.engine
+        now = time.time()
+        get = lambda name, default=0.0: getattr(engine, name, default)  # noqa: E731
+        state = "paused" if get("paused", False) else get("state", "unknown")
+        _, name = STATES.get(state, ("", inline(str(state), 30) or "unknown"))
+        lines = [title("ℹ️", "status in full", name)]
+        if state in NEXT_STEP:
+            lines.append(f"*To do* {NEXT_STEP[state]}")
+        checked = get("checked_at")
+        lines.append("*Last check* " + (f"{clock(checked, now)}, {ago(now - checked)}"
+                                        if checked else "none since the start"))
+        nexts = [f"inbox {clock(get('next_check'), now)}" if get("next_check") > now else None,
+                 f"invites {clock(get('next_invites'), now)}" if get("next_invites") > now
+                 else None]
+        if any(nexts):
+            lines.append(part("Next", nexts))
+        if get("watch_until") > now:
+            lines.append(f"*Chat on* checks every {settings.show('poll')} until "
+                         f"{clock(get('watch_until'), now)}")
+        if get("backoff_until") > now:
+            lines.append(f"*On hold* LinkedIn pushed back, nothing until "
+                         f"{clock(get('backoff_until'), now)}")
+        today = getattr(engine, "today", None)
+        if callable(today):
+            caps = (("checks", CONFIG.max_checks_per_day), ("opens", CONFIG.max_opens_per_day),
+                    ("replies", CONFIG.max_replies_per_day),
+                    ("accepts", CONFIG.max_accepts_per_day))
+            lines.append("*Today* " + DOT.join(
+                f"{today(kind)}/{cap or '∞'} {kind}" for kind, cap in caps))
+        lines.append(f"*Since start* {plural(get('accepted', 0), 'accept')}{DOT}"
+                     f"{plural(get('replies_sent', 0), 'reply', 'replies')}")
+        lines.append(part("Plan", [f"{settings.show('checks')} checks a day",
+                                   f"hours {settings.show('active_hours')}",
+                                   f"chat every {settings.show('poll')}"]))
+        lines.append(part("Mode", ["dry run, nothing sent" if settings.CONFIG.dry_run else None,
+                                   f"scope {settings.CONFIG.reply_scope}",
+                                   f"replies here {'on' if get('replies_feed', False) else 'off'}",
+                                   f"log level {self.verbose}"]))
+        lines.append(when_line(now))
+        return "\n".join(line for line in lines if line)
+
     async def reply_sent(self, sender: str, incoming: list[str], reply: str) -> None:
         """An answered conversation joins the reply feed; flush_feed() sends what waits as
         one message at most every FEED_EVERY_S."""
@@ -921,7 +1149,9 @@ class EncControl:
             return
         items, self.feed = self.feed, []
         if len(items) == 1:
-            await self.send(*reply_text(*items[0]))
+            text, whole = reply_text(*items[0])
+            await self.send(text, "\n".join([whole or reply_text(*items[0], short=False)[0],
+                                             when_line()]))
             return
         lines = [title("🆕", f"{len(items)} replies sent")]
         for sender, _incoming, reply in items[:FEED_SHORT]:
@@ -930,4 +1160,6 @@ class EncControl:
         if len(items) > FEED_SHORT:
             lines.append(f"+{len(items) - FEED_SHORT} more in Details")
         details = "\n\n".join(reply_text(*item, short=False)[0] for item in items)
+        if len(details) < MAX_MESSAGE - 40:
+            details += "\n" + when_line()
         await self.send("\n".join(lines), details[:MAX_MESSAGE])

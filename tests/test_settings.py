@@ -124,7 +124,7 @@ def control(monkeypatch):
     tg = enc.EncControl(engine)
     sent = []
 
-    async def send(text):
+    async def send(text, details=None):
         sent.append(text)
 
     tg.send = send

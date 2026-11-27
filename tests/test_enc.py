@@ -446,7 +446,9 @@ def test_send_posts_to_the_owner_with_the_secret(agent):
     engine = SimpleNamespace(verbose=0)
     ec = enc.EncControl(engine)
     asyncio.run(ec.send("*hello*"))
-    assert agent.sent == [{"to": "owner", "text": "*hello*"}]
+    assert [(m["to"], m["text"]) for m in agent.sent] == [("owner", "*hello*")]
+    # Every message has Details: without its own, the bot's whole status.
+    assert agent.sent[0]["details"].startswith("ℹ️ *LinkedIn · status in full* · ")
     assert "parse_mode" not in agent.sent[0] and "silent" not in agent.sent[0]
     agent.refuse_with = "BOT_NOT_STARTED"
     asyncio.run(ec.send("again"))  # a refusal is logged, never raised
@@ -988,3 +990,60 @@ def test_engine_alerts_fit_one_line(monkeypatch):
     for text in sent:
         assert "…" not in text, text  # nothing was cut to fit
         assert_style(text, 1)
+
+
+def test_every_message_has_details(monkeypatch, tmp_path):
+    """Every message the bot sends carries Details (SDK 0.6.0), never a copy of its text:
+    the answers to every command, the reply feed, the catch-up plan and the alerts."""
+    import dataclasses
+
+    from bot import settings
+
+    ec, engine, _ = control(monkeypatch)
+    del ec.send  # the real send, to a bot that records what reaches the agent
+    payloads: list[tuple[str, str | None]] = []
+    ec.bot = SimpleNamespace(send=lambda text, details=None: payloads.append((text, details)))
+    engine.verbose = 0
+    engine.today = lambda kind: 3
+    engine.set_verbose = lambda level: setattr(engine, "verbose", level)
+    engine.change_setting = lambda name, value: (settings.reset(name) if value is None
+                                                 else settings.apply(name, value))
+    going = []
+    engine.start_catchup = lambda days, report: not going and (going.append(days) or True)
+    engine.stop_catchup = lambda: (going.clear() or (1, 3)) if going else None
+    monkeypatch.setattr(enc, "CONFIG", dataclasses.replace(enc.CONFIG,
+                                                           metrics_path=tmp_path / "none.jsonl"))
+    try:
+        for text, _budget in EVERY_COMMAND:
+            asyncio.run(ec.handle(text))
+        asyncio.run(ec.on_event({"type": "message", "id": "m1", "from": {"id": OWNER}}))
+        engine.replies_feed = True
+        for count in (1, 3):
+            for number in range(count):
+                asyncio.run(ec.reply_sent(f"Person {number}", ["hi there"], "hey, good to hear"))
+            asyncio.run(ec.flush_feed(force=True))
+        asyncio.run(ec.send(enc.catchup_text(["Ann", "Bob"], 3, (90, 300)),
+                            enc.catchup_details(["Ann", "Bob"], 3, (90, 300))))
+    finally:
+        for name in settings.TUNABLES:
+            settings.reset(name)
+        enc.logging.getLogger().removeHandler(ec.verbose_log)
+        enc.apply_log_level(0)
+    assert len(payloads) == len(EVERY_COMMAND) + 1 + 2 + 1
+    for text, details in payloads:
+        assert details and details != text, text
+        assert details.split("\n")[0].startswith(tuple(enc.TITLE_EMOJI)) or \
+            details.startswith("/"), details
+        assert len(details) <= enc.MAX_MESSAGE
+    by_text = dict(payloads)
+    assert "*Today* 3/80 checks · 3/24 opens · 3/40 replies · 3/40 accepts" in \
+        by_text[next(t for t, _ in payloads if t.startswith("🟢 *LinkedIn · running*"))]
+    assert "/catchup 1-30 · answers unanswered" in by_text[enc.HELP]
+    assert "2. Bob" in payloads[-1][1]
+
+    alerts = []
+    monkeypatch.setattr(health.enc, "notify", lambda text, details=None: alerts.append(details))
+    monkeypatch.setattr(health.shutil, "which", lambda name: None)
+    health._last_sent.clear()
+    health.alert("sign-in needed", "sign in again over VNC", "🔴")
+    assert alerts[0].startswith("🔴 *LinkedIn · sign-in needed*\nsign in again over VNC\n*Sent* ")
